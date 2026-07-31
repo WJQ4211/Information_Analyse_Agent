@@ -20,11 +20,15 @@ openai>=1.0.0
 # 文档处理
 # minerU 或 Nougat 用于 PDF 处理
 # pip install minerU  # 用于军工学术 PDF 处理
+pymupdf>=1.23.0
 
 # 网络爬虫
 requests>=2.31.0
 beautifulsoup4>=4.12.0
 scrapy>=2.11.0
+
+# RSS/Atom 订阅源
+feedparser>=6.0.0
 
 # 自然语言处理
 # sentence-transformers 用于嵌入向量

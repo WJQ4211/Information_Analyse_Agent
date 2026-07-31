@@ -142,13 +142,27 @@ def calculate_info_credibility(evidence: Evidence,
     # 交叉印证来源的可靠度
     if knowledge_graph and evidence.cross_references:
         ref_reliabilities = []
-        for ref_id in evidence.cross_references:
-            ref_facts = knowledge_graph.get_entity_facts(evidence.entity, evidence.attribute)
+        for ref_name in evidence.cross_references:
+            # 在知识图谱中查找交叉引用来源的相关事实
+            ref_nodes = knowledge_graph.query(entity=ref_name)
+            for node in ref_nodes:
+                # 如果找到来源节点且有置信度，使用其置信度
+                if node.confidence > 0:
+                    ref_reliabilities.append(node.confidence)
+
+            # 同时查找引用该实体的事实中是否包含该来源
+            ref_facts = knowledge_graph.get_entity_facts(
+                evidence.entity, evidence.attribute
+            )
             for fact in ref_facts:
-                for src in fact.get('sources', []):
-                    # 查找来源信息
-                    pass
-        avg_reliability = 0.5  # 默认
+                if ref_name in fact.get('sources', []):
+                    # 该来源佐证了这个事实，使用事实的置信度
+                    ref_reliabilities.append(fact.get('confidence', 0.5))
+
+        if ref_reliabilities:
+            avg_reliability = sum(ref_reliabilities) / len(ref_reliabilities)
+        else:
+            avg_reliability = SR_NORM.get(evidence.source.reliability, 0.5)
     else:
         avg_reliability = SR_NORM.get(evidence.source.reliability, 0.5)
 

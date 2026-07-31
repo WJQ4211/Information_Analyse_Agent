@@ -1,0 +1,22 @@
+{
+  "ingestion_result": {
+    "document_count": 1,
+    "entity_count": 0,
+    "relation_count": 0,
+    "conflict_count": 0,
+    "has_maskirovka": false,
+    "duration_seconds": 0.0010046958923339844,
+    "status": "ingested",
+    "warnings": [
+      "未抽取到任何实体: https://example.com"
+    ],
+    "conflicts": []
+  },
+  "knowledge_graph": {
+    "node_count": 0,
+    "edge_count": 0,
+    "nodes": [],
+    "edges": []
+  },
+  "timestamp": "2026-07-31T11:17:45.452433"
+}

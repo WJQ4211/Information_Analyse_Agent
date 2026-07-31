@@ -45,12 +45,16 @@ class KnowledgeGraph:
     知识图谱管理器
 
     使用 Neo4j 作为后端存储（可选），也支持内存模式用于开发和测试。
+    支持：节点/边的增删查改、BFS 遍历、名称索引加速查找、
+    图谱快照导出/导入、Neo4j 双向同步。
     """
 
     def __init__(self, neo4j_uri: str = None, neo4j_user: str = None, neo4j_password: str = None):
         self.nodes: dict[str, GraphNode] = {}
         self.edges: list[GraphEdge] = []
         self._adjacency: dict[str, list[str]] = defaultdict(list)
+        self._name_index: dict[str, str] = {}  # name → node_id 快速查找
+        self._edge_set: set[tuple[str, str, str]] = set()  # (src, tgt, rel) 去重
 
         # Neo4j 连接（可选）
         self._driver = None
@@ -68,17 +72,43 @@ class KnowledgeGraph:
             existing = self.nodes[node.id]
             existing.attributes.update(node.attributes)
             existing.confidence = max(existing.confidence, node.confidence)
-            existing.sources.extend(node.sources)
+            # 去重合并来源列表
+            existing_sources_set = set(existing.sources)
+            for src in node.sources:
+                if src not in existing_sources_set:
+                    existing.sources.append(src)
+                    existing_sources_set.add(src)
         else:
             self.nodes[node.id] = node
+
+        # 更新名称索引
+        self._name_index[node.name] = node.id
 
         # 同步到 Neo4j
         if self._driver:
             self._sync_node_to_neo4j(node)
 
     def add_edge(self, edge: GraphEdge) -> None:
-        """添加边到知识图谱"""
+        """添加边到知识图谱（自动去重）"""
+        edge_key = (edge.source_id, edge.target_id, edge.relation)
+        if edge_key in self._edge_set:
+            # 边已存在，更新置信度和证据
+            for existing_edge in self.edges:
+                if (existing_edge.source_id == edge.source_id
+                        and existing_edge.target_id == edge.target_id
+                        and existing_edge.relation == edge.relation):
+                    existing_edge.confidence = max(existing_edge.confidence, edge.confidence)
+                    # 合并证据（去重）
+                    existing_evidence_set = set(existing_edge.evidence)
+                    for ev in edge.evidence:
+                        if ev not in existing_evidence_set:
+                            existing_edge.evidence.append(ev)
+                            existing_evidence_set.add(ev)
+                    break
+            return
+
         self.edges.append(edge)
+        self._edge_set.add(edge_key)
         self._adjacency[edge.source_id].append(edge.target_id)
 
         if self._driver:
@@ -164,6 +194,197 @@ class KnowledgeGraph:
                 })
 
         return facts
+
+    def find_node_by_name(self, name: str) -> Optional[GraphNode]:
+        """
+        按名称快速查找节点（使用名称索引，O(1) 复杂度）
+
+        Args:
+            name: 实体名称或实体 ID
+
+        Returns:
+            匹配的 GraphNode，未找到返回 None
+        """
+        # 先查名称索引
+        node_id = self._name_index.get(name)
+        if node_id and node_id in self.nodes:
+            return self.nodes[node_id]
+
+        # 回退：直接按 ID 查找
+        if name in self.nodes:
+            return self.nodes[name]
+
+        return None
+
+    def get_edges_for_node(self, node_id: str) -> list[GraphEdge]:
+        """获取与指定节点关联的所有边"""
+        return [e for e in self.edges
+                if e.source_id == node_id or e.target_id == node_id]
+
+    def get_statistics(self) -> dict:
+        """
+        获取知识图谱统计信息
+
+        Returns:
+            包含节点数、边数、类型分布等的字典
+        """
+        type_counts = defaultdict(int)
+        for node in self.nodes.values():
+            type_counts[node.type] += 1
+
+        relation_counts = defaultdict(int)
+        for edge in self.edges:
+            relation_counts[edge.relation] += 1
+
+        avg_confidence = (
+            sum(n.confidence for n in self.nodes.values()) / len(self.nodes)
+            if self.nodes else 0.0
+        )
+
+        return {
+            "node_count": len(self.nodes),
+            "edge_count": len(self.edges),
+            "type_distribution": dict(type_counts),
+            "relation_distribution": dict(relation_counts),
+            "avg_confidence": round(avg_confidence, 3),
+            "unique_sources": len(set(
+                src for node in self.nodes.values() for src in node.sources
+            )),
+        }
+
+    def export_snapshot(self) -> dict:
+        """
+        导出知识图谱快照（JSON 可序列化）
+
+        用于保存/传输知识图谱状态。
+
+        Returns:
+            包含所有节点和边的字典
+        """
+        return {
+            "nodes": [
+                {
+                    "id": n.id,
+                    "type": n.type,
+                    "name": n.name,
+                    "attributes": n.attributes,
+                    "confidence": n.confidence,
+                    "sources": n.sources,
+                    "created_at": n.created_at,
+                }
+                for n in self.nodes.values()
+            ],
+            "edges": [
+                {
+                    "source_id": e.source_id,
+                    "target_id": e.target_id,
+                    "relation": e.relation,
+                    "confidence": e.confidence,
+                    "evidence": e.evidence,
+                }
+                for e in self.edges
+            ],
+            "statistics": self.get_statistics(),
+            "exported_at": datetime.now().isoformat(),
+        }
+
+    def import_snapshot(self, snapshot: dict) -> int:
+        """
+        从快照导入知识图谱数据
+
+        Args:
+            snapshot: export_snapshot() 生成的字典
+
+        Returns:
+            导入的节点数量
+        """
+        imported = 0
+        for node_data in snapshot.get("nodes", []):
+            node = GraphNode(
+                id=node_data["id"],
+                type=node_data["type"],
+                name=node_data["name"],
+                attributes=node_data.get("attributes", {}),
+                confidence=node_data.get("confidence", 1.0),
+                sources=node_data.get("sources", []),
+                created_at=node_data.get("created_at", datetime.now().isoformat()),
+            )
+            self.add_node(node)
+            imported += 1
+
+        for edge_data in snapshot.get("edges", []):
+            edge = GraphEdge(
+                source_id=edge_data["source_id"],
+                target_id=edge_data["target_id"],
+                relation=edge_data["relation"],
+                confidence=edge_data.get("confidence", 1.0),
+                evidence=edge_data.get("evidence", []),
+            )
+            self.add_edge(edge)
+
+        return imported
+
+    def load_from_neo4j(self) -> int:
+        """
+        从 Neo4j 加载知识图谱数据到内存
+
+        Returns:
+            加载的节点数量，如果 Neo4j 未连接返回 0
+        """
+        if not self._driver:
+            return 0
+
+        loaded = 0
+        try:
+            with self._driver.session() as session:
+                # 加载所有节点
+                result = session.run(
+                    "MATCH (n) RETURN n.id AS id, n.name AS name, "
+                    "n.type AS type, n.confidence AS confidence, "
+                    "n.attributes AS attributes, n.sources AS sources"
+                )
+                for record in result:
+                    attrs = json.loads(record["attributes"]) if record["attributes"] else {}
+                    sources = json.loads(record["sources"]) if record["sources"] else []
+                    node = GraphNode(
+                        id=record["id"],
+                        type=record["type"] or "Unknown",
+                        name=record["name"] or record["id"],
+                        attributes=attrs,
+                        confidence=record["confidence"] or 1.0,
+                        sources=sources,
+                    )
+                    # 直接设置以避免重复同步
+                    self.nodes[node.id] = node
+                    self._name_index[node.name] = node.id
+                    loaded += 1
+
+                # 加载所有边
+                result = session.run(
+                    "MATCH (a)-[r:RELATION]->(b) "
+                    "RETURN a.id AS source_id, b.id AS target_id, "
+                    "r.relation AS relation, r.confidence AS confidence, "
+                    "r.evidence AS evidence"
+                )
+                for record in result:
+                    edge_key = (record["source_id"], record["target_id"], record["relation"])
+                    if edge_key not in self._edge_set:
+                        evidence = json.loads(record["evidence"]) if record["evidence"] else []
+                        edge = GraphEdge(
+                            source_id=record["source_id"],
+                            target_id=record["target_id"],
+                            relation=record["relation"],
+                            confidence=record["confidence"] or 1.0,
+                            evidence=evidence,
+                        )
+                        self.edges.append(edge)
+                        self._edge_set.add(edge_key)
+                        self._adjacency[edge.source_id].append(edge.target_id)
+
+        except Exception:
+            pass  # Neo4j 加载失败时静默处理
+
+        return loaded
 
     def _sync_node_to_neo4j(self, node: GraphNode) -> None:
         """同步节点到 Neo4j"""

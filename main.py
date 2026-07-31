@@ -45,6 +45,10 @@ from agents import (
     JudgeAgent,
     RedTeamOrchestrator,
 )
+from ingestion import (
+    IngestionPipeline,
+    IngestionResult,
+)
 
 
 def create_demo_knowledge_graph() -> KnowledgeGraph:
@@ -275,6 +279,181 @@ async def run_analysis(topic: str, use_demo: bool = True) -> dict:
     return result
 
 
+async def run_ingest(
+    sources: list[str],
+    source_name: str,
+    source_reliability: str,
+    use_demo: bool = True,
+) -> dict:
+    """
+    运行 OSINT 数据采集与知识图谱构建
+
+    Args:
+        sources: 数据源列表，格式为 "type:path"（如 "web:https://...", "pdf:./file.pdf"）
+        source_name: 来源名称（用于 NATO 评级）
+        source_reliability: 来源可靠度等级 (A-F)
+        use_demo: 是否使用 Mock LLM
+    """
+    print(f"[*] 开始数据采集与知识图谱构建")
+    print(f"[*] 数据源数量: {len(sources)}")
+    print(f"[*] 来源名称: {source_name}")
+    print(f"[*] 可靠度等级: {source_reliability}")
+
+    # 1. 初始化基础设施
+    if use_demo:
+        kg = KnowledgeGraph()
+        memory = TimeSeriesMemory(max_entries=1000)
+        llm = LLMClient(LLMConfig())
+    else:
+        kg = KnowledgeGraph()
+        memory = TimeSeriesMemory()
+        llm = LLMClient(LLMConfig(
+            model_name="qwen2-72b",
+            api_base="http://localhost:8000/v1",
+        ))
+
+    print("[*] 基础设施初始化完成")
+
+    # 2. 构建来源信息
+    reliability_map = {
+        "A": SourceReliability.A, "B": SourceReliability.B,
+        "C": SourceReliability.C, "D": SourceReliability.D,
+        "E": SourceReliability.E, "F": SourceReliability.F,
+    }
+    reliability = reliability_map.get(source_reliability.upper(), SourceReliability.C)
+
+    source_info = SourceInfo(
+        name=source_name,
+        reliability=reliability,
+        history_accuracy=0.7,
+        expertise_level=0.7,
+        independence=0.6,
+        traceability=True,
+    )
+
+    # 3. 创建管道
+    pipeline = IngestionPipeline(kg, llm, memory=memory)
+
+    # 4. 分类数据源
+    urls: list[str] = []
+    files: list[str] = []
+
+    for source_str in sources:
+        parts = source_str.split(":", 1)
+        if len(parts) != 2:
+            print(f"[!] 格式错误，跳过: {source_str}（应为 type:path）")
+            continue
+
+        source_type, source_path = parts
+        if source_type == "pdf":
+            files.append(source_path)
+        elif source_type in ("web", "feed"):
+            urls.append(source_str)  # 保留 type:path 格式供管道解析
+        else:
+            print(f"[!] 未知类型，跳过: {source_type}")
+
+    # 5. 执行采集
+    print("[*] 开始数据采集...")
+    result = IngestionResult()
+
+    if urls:
+        print(f"[*] 采集 URL: {len(urls)} 个")
+        url_result = await pipeline.ingest_from_urls(
+            [s.split(":", 1)[1] for s in urls],
+            source_info,
+        )
+        result.merge(url_result)
+
+    if files:
+        print(f"[*] 处理文件: {len(files)} 个")
+        file_result = await pipeline.ingest_from_files(files, source_info)
+        result.merge(file_result)
+
+    # 6. 输出结果
+    print("\n" + "=" * 60)
+    print("采集与入库结果")
+    print("=" * 60)
+    print(f"  文档数: {result.document_count}")
+    print(f"  实体数: {result.entity_count}")
+    print(f"  关系数: {result.relation_count}")
+    print(f"  冲突数: {result.conflict_count}")
+    print(f"  战略欺骗嫌疑: {'是' if result.has_maskirovka else '否'}")
+    print(f"  耗时: {result.duration_seconds:.2f} 秒")
+    print(f"  状态: {result.status.value}")
+
+    if result.warnings:
+        print("\n警告信息:")
+        for w in result.warnings:
+            print(f"  [!] {w}")
+
+    if result.conflicts:
+        print("\n冲突记录:")
+        for c in result.conflicts:
+            flag = " [战略欺骗]" if c.maskirovka_flag else ""
+            print(f"  - {c.entity_name}.{c.attribute}: 冲突度 {c.conflict_score:.2f}{flag}")
+
+    # 7. 知识图谱统计
+    print(f"\n知识图谱统计:")
+    print(f"  节点数: {len(kg.nodes)}")
+    print(f"  边数: {len(kg.edges)}")
+
+    if kg.nodes:
+        print("\n实体列表:")
+        for node_id, node in kg.nodes.items():
+            print(f"  [{node.type}] {node.name} (置信度: {node.confidence:.2f})")
+
+    print("\n" + "=" * 60)
+
+    # 8. 保存结果
+    output = {
+        "ingestion_result": {
+            "document_count": result.document_count,
+            "entity_count": result.entity_count,
+            "relation_count": result.relation_count,
+            "conflict_count": result.conflict_count,
+            "has_maskirovka": result.has_maskirovka,
+            "duration_seconds": result.duration_seconds,
+            "status": result.status.value,
+            "warnings": result.warnings,
+            "conflicts": [
+                {
+                    "entity": c.entity_name,
+                    "attribute": c.attribute,
+                    "conflict_score": c.conflict_score,
+                    "maskirovka": c.maskirovka_flag,
+                }
+                for c in result.conflicts
+            ],
+        },
+        "knowledge_graph": {
+            "node_count": len(kg.nodes),
+            "edge_count": len(kg.edges),
+            "nodes": [
+                {
+                    "id": n.id,
+                    "type": n.type,
+                    "name": n.name,
+                    "confidence": n.confidence,
+                    "sources": n.sources,
+                }
+                for n in kg.nodes.values()
+            ],
+            "edges": [
+                {
+                    "source": e.source_id,
+                    "target": e.target_id,
+                    "relation": e.relation,
+                    "confidence": e.confidence,
+                }
+                for e in kg.edges
+            ],
+        },
+        "timestamp": datetime.now().isoformat(),
+    }
+
+    return output
+
+
 async def run_demo() -> None:
     """运行完整演示"""
     print("=" * 60)
@@ -328,9 +507,11 @@ async def run_demo() -> None:
 def run_tests() -> None:
     """运行单元测试"""
     import subprocess
+    import os
+    project_dir = os.path.dirname(os.path.abspath(__file__))
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "tests/", "-v"],
-        cwd="/".join(__file__.split("/")[:-1])
+        cwd=project_dir,
     )
     sys.exit(result.returncode)
 
@@ -342,15 +523,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例：
-    python main.py --mode demo                    # 运行演示
-    python main.py --mode analyze --topic "导弹发展"  # 运行分析
-    python main.py --mode test                    # 运行测试
+    python main.py --mode demo                              # 运行演示
+    python main.py --mode analyze --topic "导弹发展"            # 运行分析（需要本地 LLM）
+    python main.py --mode ingest --sources "web:https://example.com" --source-name "简氏防务" --source-reliability A
+    python main.py --mode ingest --sources "web:https://example.com" --demo  # 使用 Mock LLM 测试
+    python main.py --mode test                              # 运行测试
         """
     )
 
     parser.add_argument(
         "--mode", "-m",
-        choices=["analyze", "demo", "test"],
+        choices=["analyze", "demo", "test", "ingest"],
         default="demo",
         help="运行模式"
     )
@@ -366,6 +549,32 @@ def main():
         default="analysis_result.json",
         help="输出文件路径"
     )
+    parser.add_argument(
+        "--sources", "-s",
+        type=str,
+        nargs="+",
+        default=[],
+        help="数据源列表（格式: type:path），支持 web/feed/pdf"
+    )
+    parser.add_argument(
+        "--source-name",
+        type=str,
+        default="OSINT 公开来源",
+        help="来源名称（用于 NATO 评级）"
+    )
+    parser.add_argument(
+        "--source-reliability",
+        type=str,
+        default="C",
+        choices=["A", "B", "C", "D", "E", "F"],
+        help="来源可靠度等级 (A=极其可靠, F=无法评定)"
+    )
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        default=False,
+        help="使用 Mock LLM 运行（用于测试，不需要本地 LLM 服务）"
+    )
 
     args = parser.parse_args()
 
@@ -373,6 +582,20 @@ def main():
         asyncio.run(run_demo())
     elif args.mode == "analyze":
         result = asyncio.run(run_analysis(args.topic, use_demo=False))
+        with open(args.output, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+        print(f"\n[*] 结果已保存到: {args.output}")
+    elif args.mode == "ingest":
+        if not args.sources:
+            print("[!] 错误: ingest 模式需要指定 --sources 参数")
+            print("    示例: python main.py --mode ingest --sources \"web:https://example.com\"")
+            sys.exit(1)
+        result = asyncio.run(run_ingest(
+            sources=args.sources,
+            source_name=args.source_name,
+            source_reliability=args.source_reliability,
+            use_demo=args.demo,
+        ))
         with open(args.output, "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
         print(f"\n[*] 结果已保存到: {args.output}")

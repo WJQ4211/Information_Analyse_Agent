@@ -1,0 +1,105 @@
+{
+  "topic": "DF-21D 反舰弹道导弹发展",
+  "final_conclusion": {
+    "main_points": [
+      "基于当前事实，敌方在DF-21D 反舰弹道导弹发展领域存在一定的发展潜力",
+      "识别到 8 个潜在薄弱点",
+      "轨迹预测显示 TRL 等级为 1"
+    ],
+    "confidence": 0.006920643600499995,
+    "evidence_count": 0,
+    "open_questions": [
+      "需要更多交叉印证的证据"
+    ]
+  },
+  "debate_rounds": 3,
+  "total_challenges": 21,
+  "resolved_challenges": [
+    {
+      "type": "logic_flaw",
+      "description": "结论 1 与结论 2 存在矛盾：'基于当前事实，敌方在DF-21D 反舰弹道导弹发展领域存在一定的发展潜力' vs '识别到 8 个潜在薄弱点'",
+      "severity": 0.8
+    },
+    {
+      "type": "logic_flaw",
+      "description": "结论 1 与结论 3 存在矛盾：'基于当前事实，敌方在DF-21D 反舰弹道导弹发展领域存在一定的发展潜力' vs '轨迹预测显示 TRL 等级为 1'",
+      "severity": 0.8
+    },
+    {
+      "type": "logic_flaw",
+      "description": "结论 2 与结论 3 存在矛盾：'识别到 8 个潜在薄弱点' vs '轨迹预测显示 TRL 等级为 1'",
+      "severity": 0.8
+    },
+    {
+      "type": "logic_flaw",
+      "description": "结论缺乏足够的证据支持（少于 2 条独立证据）",
+      "severity": 0.9
+    },
+    {
+      "type": "fact_gap",
+      "description": "结论 '基于当前事实，敌方在DF-21D 反舰弹道导弹发展领域存在一定的发展潜力...' 缺少关键证据",
+      "severity": 0.6
+    },
+    {
+      "type": "fact_gap",
+      "description": "结论 '识别到 8 个潜在薄弱点...' 缺少关键证据",
+      "severity": 0.6
+    },
+    {
+      "type": "fact_gap",
+      "description": "结论 '轨迹预测显示 TRL 等级为 1...' 缺少关键证据",
+      "severity": 0.6
+    }
+  ],
+  "vulnerabilities": [
+    {
+      "dimension": "Doctrine",
+      "weakness_score": 1.0,
+      "confidence": 0.3,
+      "description": "敌方条令维存在严重薄弱点（薄弱度: 1.00）。依据证据: 缺乏相关证据"
+    },
+    {
+      "dimension": "Materiel",
+      "weakness_score": 1.0,
+      "confidence": 0.3,
+      "description": "敌方物资维存在严重薄弱点（薄弱度: 1.00）。依据证据: 缺乏相关证据"
+    },
+    {
+      "dimension": "Leadership",
+      "weakness_score": 1.0,
+      "confidence": 0.3,
+      "description": "敌方领导力维存在严重薄弱点（薄弱度: 1.00）。依据证据: 缺乏相关证据"
+    },
+    {
+      "dimension": "Personnel",
+      "weakness_score": 1.0,
+      "confidence": 0.3,
+      "description": "敌方人员维存在严重薄弱点（薄弱度: 1.00）。依据证据: 缺乏相关证据"
+    },
+    {
+      "dimension": "Facilities",
+      "weakness_score": 1.0,
+      "confidence": 0.3,
+      "description": "敌方设施维存在严重薄弱点（薄弱度: 1.00）。依据证据: 缺乏相关证据"
+    },
+    {
+      "dimension": "Policy",
+      "weakness_score": 1.0,
+      "confidence": 0.3,
+      "description": "敌方政策维存在严重薄弱点（薄弱度: 1.00）。依据证据: 缺乏相关证据"
+    },
+    {
+      "dimension": "Organization",
+      "weakness_score": 0.5,
+      "confidence": 0.85,
+      "description": "敌方组织维存在轻微薄弱点（薄弱度: 0.50）。依据证据: 中国航天工业集团 - role: 主要研发单位; 中国航天工业集团 - established: 1950-10-01; 中国航天工业集团 - employees: 150000"
+    },
+    {
+      "dimension": "Training",
+      "weakness_score": 0.5,
+      "confidence": 0.75,
+      "description": "敌方训练维存在轻微薄弱点（薄弱度: 0.50）。依据证据: 操作培训计划 - status: 不足; 操作培训计划 - trained_personnel: 30; 操作培训计划 - required_personnel: 72"
+    }
+  ],
+  "timestamp": "2026-07-31T11:18:01.080552"
+}
