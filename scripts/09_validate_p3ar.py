@@ -310,6 +310,13 @@ def main() -> int:
         "requested_model_id": execute_manifest.get("requested_model_id"),
         "provider_model_ids_observed": sorted({call.get("provider_model_id") for call in execute_manifest.get("api_call_records", []) if call.get("provider_model_id")}),
         "provider_call_count": execute_manifest.get("provider_call_count"),
+        "provider_call_count_status": execute_manifest.get("provider_call_count_status", "observed_network_attempts"),
+        "provider_metrics": {
+            "temperature": execute_manifest.get("provider_temperature"),
+            "cost": execute_manifest.get("provider_cost"),
+            "token_usage_recorded_per_call": True,
+            "status": "provider_temperature_and_cost_not_observable" if execute_manifest.get("provider_temperature") is None and execute_manifest.get("provider_cost") is None else "partial",
+        },
         "logical_extraction_batch_count": execute_manifest.get("logical_extraction_batch_count"),
         "logical_semantic_review_batch_count": execute_manifest.get("logical_semantic_review_batch_count"),
         "api_key_written": False,

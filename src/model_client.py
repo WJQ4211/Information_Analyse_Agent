@@ -132,6 +132,8 @@ class ApiCallRecord:
     response_sha256: str
     provider_token_usage: dict[str, int | None]
     provider_metrics_status: str
+    provider_temperature: float | None
+    provider_cost: float | None
     response_status_code: int
 
     def as_dict(self) -> dict[str, Any]:
@@ -257,6 +259,8 @@ class APIModelClient:
             response_sha256=_sha256_bytes(response_bytes),
             provider_token_usage=token_usage,
             provider_metrics_status=metrics_status,
+            provider_temperature=None,
+            provider_cost=None,
             response_status_code=status_code,
         )
         return payload, content, record
