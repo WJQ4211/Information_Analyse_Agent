@@ -163,7 +163,15 @@ class EvidenceCitation(SchemaBase):
 
 
 EVIDENCE_NATURE_VALUES = frozenset(
-    {"goal", "resource_input", "test_result", "deployment_event", "constraint", "evaluation"}
+    {
+        "goal",
+        "resource_input",
+        "test_event",
+        "test_result",
+        "deployment_event",
+        "constraint",
+        "evaluation",
+    }
 )
 CODING_DIMENSION_VALUES = frozenset(
     {

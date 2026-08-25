@@ -92,6 +92,7 @@ def validate_candidate(
     nature_valid = candidate.evidence_nature in {
         "goal",
         "resource_input",
+        "test_event",
         "test_result",
         "deployment_event",
         "constraint",
@@ -206,4 +207,3 @@ def inject_deterministic_metadata(
 def candidate_payload(candidate: EvidenceCandidate) -> dict[str, Any]:
     """Return only the fields permitted in a raw model response."""
     return {key: model_dump(candidate)[key] for key in RAW_CANDIDATE_FIELDS}
-

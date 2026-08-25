@@ -1,15 +1,16 @@
 prompt_id: evidence_extract
 version: "1.0"
-purpose: "P3a pilot extraction of auditable evidence candidates from supplied T0 source text"
+purpose: "P3a-R real-model extraction of auditable evidence candidates from supplied T0 source text"
 research_question: "以公开、非密材料为依据，截至2024年12月31日，美军军用人工智能能力建设在2025—2027年更可能呈现何种主导部署形态？"
 allowed_input_fields:
   - source_id
-  - title
-  - publisher
-  - published_at
-  - source_grade
   - source_locator
   - source_text
+  - pdf_page_number
+  - printed_page_number
+  - section_title
+  - machine_extracted_anchor
+  - visual_review_required
 output_schema:
   type: array
   items:
@@ -31,7 +32,7 @@ output_schema:
       excerpt_zh: {type: string}
       normalized_claim: {type: string}
       coding_dimensions: {type: array, items: {type: string}}
-      evidence_nature: {type: string, enum: [goal, resource_input, test_result, deployment_event, constraint, evaluation]}
+      evidence_nature: {type: string, enum: [goal, resource_input, test_event, test_result, deployment_event, constraint, evaluation]}
       topics: {type: array, items: {type: string}}
 coding_dimension_definitions:
   integration_level: "能力集成层级：单工具、单任务、单平台、跨平台、跨任务或体系级集成。"
@@ -43,7 +44,8 @@ coding_dimension_definitions:
 evidence_nature_definitions:
   goal: "战略目标、计划或期望结果；不能写成已实现能力。"
   resource_input: "预算、人才、数据、基础设施或其他投入。"
-  test_result: "试验、演习或测试中被明确观察或报告的结果；参与不等于作战效能证明。"
+  test_event: "仅证明测试或演习发生、参与主体和配置；不表示观察到的性能或功能结果。"
+  test_result: "证明测试中观察到的功能、性能或结果；演习发生或参与不自动满足此类。"
   deployment_event: "已发生且可定位的采购、部署、推广或持续使用事件。"
   constraint: "明确的限制、风险、缺口或适用边界。"
   evaluation: "测试评价、验证、审计或评估活动及其明确结论。"
@@ -53,6 +55,9 @@ forbidden:
   - "不得生成竞争性假设、观点、案例结论或2025—2027最终路线判断。"
   - "不得把战略愿景或计划标为deployment_event或test_result。"
   - "不得把演习参与写成已证明作战效能。"
+  - "不得使用伪连续定位；非连续摘录必须拆成不同证据。"
+  - "英文候选的excerpt_zh不得为空，且必须标记为pending_g1_translation_review。"
+  - "疑似AI/Al、DoD/OoD、RAI/RAJ等提取错误不得悄悄自动纠正。"
   - "excerpt_original必须逐字来自指定source_locator中的文本。"
   - "证据不足时少输出，不得为达到数量要求凑条目。"
 json_repair_prompt: "只修复JSON语法、缺失的允许字段或字段类型；不得补写事实、改写excerpt_original或新增确定性元数据。修复后仍只能输出严格JSON数组。"
