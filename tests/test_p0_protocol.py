@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from src.pipeline import T1SealedAccessError, ingest, init_case, read_t1_sealed_records
+from src.pipeline import T1SealedAccessError, ingest, init_case, read_records, read_t1_sealed_records
 from src.schemas import Evidence, HumanReview, SnapshotTag
 from src.storage import Store
 
@@ -54,6 +54,8 @@ def test_p0_t1_sealed_directory_is_locked_until_g4_t0(tmp_path: Path) -> None:
         ingest(tmp_path, case_id="synthetic_military_ai", phase=SnapshotTag.T1, input_path=sealed, run_id="RUN-P0-LOCKED")
     with pytest.raises(T1SealedAccessError, match="G4_T0"):
         read_t1_sealed_records(tmp_path, case_id="synthetic_military_ai", input_path=sealed)
+    with pytest.raises(T1SealedAccessError, match="Direct reads"):
+        read_records(sealed)
 
     with Store(tmp_path / "data" / "research.sqlite3") as store:
         store.record_human_review(

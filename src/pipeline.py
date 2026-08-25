@@ -95,13 +95,19 @@ def read_json(path: str | Path) -> Any:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def read_records(path: str | Path, key: Optional[str] = None) -> List[Dict[str, Any]]:
+def read_records(
+    path: str | Path, key: Optional[str] = None, *, _allow_t1_sealed: bool = False
+) -> List[Dict[str, Any]]:
     source = Path(path)
+    if is_t1_sealed_path(source) and not _allow_t1_sealed:
+        raise T1SealedAccessError(
+            "Direct reads from t1_sealed are blocked; use read_t1_sealed_records after G4-T0"
+        )
     if source.is_dir():
         files = sorted(p for p in source.iterdir() if p.suffix.lower() in {".json", ".jsonl"})
         records: List[Dict[str, Any]] = []
         for file in files:
-            records.extend(read_records(file, key=key))
+            records.extend(read_records(file, key=key, _allow_t1_sealed=_allow_t1_sealed))
         return records
     if source.suffix.lower() == ".jsonl":
         records = []
@@ -151,7 +157,7 @@ def read_t1_sealed_records(
     root = workspace_path(workspace)
     with Store(root / "data" / "research.sqlite3") as store:
         assert_t1_sealed_unlocked(store, case_id)
-        return read_records(input_path, key=key)
+        return read_records(input_path, key=key, _allow_t1_sealed=True)
 
 
 def hash_path(path: str | Path, root: Optional[Path] = None) -> str:
@@ -424,7 +430,11 @@ def ingest(
         load_case_config(store, case_id)
         if phase == SnapshotTag.T1 and is_t1_sealed_path(input_path):
             assert_t1_sealed_unlocked(store, case_id)
-        records = read_records(input_path, key="evidence")
+        records = read_records(
+            input_path,
+            key="evidence",
+            _allow_t1_sealed=phase == SnapshotTag.T1 and is_t1_sealed_path(input_path),
+        )
         inserted: List[Evidence] = []
         for raw in records:
             data = dict(raw)
