@@ -25,8 +25,13 @@ from src.schemas import (
 from src.storage import StorageError, Store
 
 
-def make_evidence(evidence_id: str, tag: SnapshotTag = SnapshotTag.T0) -> Evidence:
+def make_evidence(
+    evidence_id: str,
+    tag: SnapshotTag = SnapshotTag.T0,
+    case_id: str = "synthetic_test",
+) -> Evidence:
     return Evidence(
+        case_id=case_id,
         evidence_id=evidence_id,
         version=1,
         snapshot_tag=tag,
@@ -46,7 +51,7 @@ def make_evidence(evidence_id: str, tag: SnapshotTag = SnapshotTag.T0) -> Eviden
 
 
 def make_snapshot(store: Store, tag: SnapshotTag = SnapshotTag.T0) -> EvidenceSnapshot:
-    evidence = make_evidence(f"EV-{tag.value}", tag)
+    evidence = make_evidence(f"EV-{tag.value}", tag, case_id="synthetic_test")
     store.insert_evidence(evidence)
     return store.create_snapshot(
         snapshot_id=f"SNAP-{tag.value}",

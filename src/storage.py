@@ -50,14 +50,19 @@ CREATE TABLE IF NOT EXISTS case_config (
 );
 
 CREATE TABLE IF NOT EXISTS evidence (
+    case_id TEXT NOT NULL,
     evidence_id TEXT NOT NULL,
     version INTEGER NOT NULL CHECK(version >= 1),
     snapshot_tag TEXT NOT NULL CHECK(snapshot_tag IN ('T0', 'T1')),
     status TEXT NOT NULL,
     published_at TEXT NOT NULL,
     content_hash TEXT NOT NULL,
+    evidence_nature TEXT NOT NULL DEFAULT 'legacy_unclassified',
+    excerpt_original TEXT NOT NULL DEFAULT '',
+    excerpt_zh TEXT NOT NULL DEFAULT '',
+    coding_dimensions_json TEXT NOT NULL DEFAULT '[]',
     payload_json TEXT NOT NULL,
-    PRIMARY KEY (evidence_id, version)
+    PRIMARY KEY (case_id, evidence_id, version)
 );
 
 CREATE TABLE IF NOT EXISTS evidence_snapshot (
@@ -74,11 +79,12 @@ CREATE TABLE IF NOT EXISTS evidence_snapshot (
 
 CREATE TABLE IF NOT EXISTS snapshot_items (
     snapshot_id TEXT NOT NULL,
+    case_id TEXT NOT NULL,
     evidence_id TEXT NOT NULL,
     version INTEGER NOT NULL,
-    PRIMARY KEY(snapshot_id, evidence_id, version),
+    PRIMARY KEY(snapshot_id, case_id, evidence_id, version),
     FOREIGN KEY(snapshot_id) REFERENCES evidence_snapshot(snapshot_id),
-    FOREIGN KEY(evidence_id, version) REFERENCES evidence(evidence_id, version)
+    FOREIGN KEY(case_id, evidence_id, version) REFERENCES evidence(case_id, evidence_id, version)
 );
 
 CREATE TABLE IF NOT EXISTS hypothesis (
@@ -101,6 +107,7 @@ CREATE TABLE IF NOT EXISTS viewpoint (
 
 CREATE TABLE IF NOT EXISTS evidence_dependency (
     edge_id TEXT PRIMARY KEY,
+    case_id TEXT NOT NULL,
     evidence_id TEXT NOT NULL,
     evidence_version INTEGER NOT NULL,
     viewpoint_id TEXT NOT NULL,
@@ -108,7 +115,7 @@ CREATE TABLE IF NOT EXISTS evidence_dependency (
     relation TEXT NOT NULL,
     importance TEXT NOT NULL,
     payload_json TEXT NOT NULL,
-    FOREIGN KEY(evidence_id, evidence_version) REFERENCES evidence(evidence_id, version),
+    FOREIGN KEY(case_id, evidence_id, evidence_version) REFERENCES evidence(case_id, evidence_id, version),
     FOREIGN KEY(viewpoint_id, viewpoint_version) REFERENCES viewpoint(viewpoint_id, version)
 );
 
@@ -179,32 +186,105 @@ CREATE TABLE IF NOT EXISTS artifact (
     payload_json TEXT NOT NULL
 );
 
-CREATE TRIGGER IF NOT EXISTS prevent_frozen_snapshot_update
+CREATE TABLE IF NOT EXISTS pipeline_run (
+    run_id TEXT PRIMARY KEY,
+    case_id TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    payload_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS pipeline_stage (
+    stage_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    case_id TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    stage_name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    FOREIGN KEY(run_id) REFERENCES pipeline_run(run_id)
+);
+
+CREATE TABLE IF NOT EXISTS model_call (
+    call_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    case_id TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    FOREIGN KEY(run_id) REFERENCES pipeline_run(run_id)
+);
+"""
+
+
+TRIGGER_SQL = """
+DROP TRIGGER IF EXISTS prevent_frozen_snapshot_update;
+DROP TRIGGER IF EXISTS prevent_frozen_snapshot_delete;
+DROP TRIGGER IF EXISTS prevent_frozen_snapshot_item_insert;
+DROP TRIGGER IF EXISTS prevent_frozen_snapshot_item_update;
+DROP TRIGGER IF EXISTS prevent_frozen_snapshot_item_delete;
+DROP TRIGGER IF EXISTS prevent_evidence_update;
+DROP TRIGGER IF EXISTS prevent_evidence_delete;
+DROP TRIGGER IF EXISTS prevent_viewpoint_update;
+DROP TRIGGER IF EXISTS prevent_viewpoint_delete;
+
+CREATE TRIGGER prevent_frozen_snapshot_update
 BEFORE UPDATE ON evidence_snapshot
 WHEN OLD.frozen = 1
 BEGIN
     SELECT RAISE(ABORT, 'frozen evidence snapshot is immutable');
 END;
 
-CREATE TRIGGER IF NOT EXISTS prevent_frozen_snapshot_delete
+CREATE TRIGGER prevent_frozen_snapshot_delete
 BEFORE DELETE ON evidence_snapshot
 WHEN OLD.frozen = 1
 BEGIN
     SELECT RAISE(ABORT, 'frozen evidence snapshot is immutable');
 END;
 
-CREATE TRIGGER IF NOT EXISTS prevent_frozen_snapshot_item_update
+CREATE TRIGGER prevent_frozen_snapshot_item_insert
+BEFORE INSERT ON snapshot_items
+WHEN (SELECT frozen FROM evidence_snapshot WHERE snapshot_id = NEW.snapshot_id) = 1
+BEGIN
+    SELECT RAISE(ABORT, 'items of a frozen evidence snapshot are immutable');
+END;
+
+CREATE TRIGGER prevent_frozen_snapshot_item_update
 BEFORE UPDATE ON snapshot_items
 WHEN (SELECT frozen FROM evidence_snapshot WHERE snapshot_id = OLD.snapshot_id) = 1
 BEGIN
     SELECT RAISE(ABORT, 'items of a frozen evidence snapshot are immutable');
 END;
 
-CREATE TRIGGER IF NOT EXISTS prevent_frozen_snapshot_item_delete
+CREATE TRIGGER prevent_frozen_snapshot_item_delete
 BEFORE DELETE ON snapshot_items
 WHEN (SELECT frozen FROM evidence_snapshot WHERE snapshot_id = OLD.snapshot_id) = 1
 BEGIN
     SELECT RAISE(ABORT, 'items of a frozen evidence snapshot are immutable');
+END;
+
+CREATE TRIGGER prevent_evidence_update
+BEFORE UPDATE ON evidence
+BEGIN
+    SELECT RAISE(ABORT, 'evidence history is append-only');
+END;
+
+CREATE TRIGGER prevent_evidence_delete
+BEFORE DELETE ON evidence
+BEGIN
+    SELECT RAISE(ABORT, 'evidence history is append-only');
+END;
+
+CREATE TRIGGER prevent_viewpoint_update
+BEFORE UPDATE ON viewpoint
+BEGIN
+    SELECT RAISE(ABORT, 'viewpoint history is append-only');
+END;
+
+CREATE TRIGGER prevent_viewpoint_delete
+BEFORE DELETE ON viewpoint
+BEGIN
+    SELECT RAISE(ABORT, 'viewpoint history is append-only');
 END;
 """
 
@@ -227,7 +307,7 @@ def _canonical_payload(value: Any) -> Any:
         return {
             key: _canonical_payload(item)
             for key, item in value.items()
-            if key not in {"created_at", "run_id", "created_by"}
+            if key not in {"created_at", "reviewed_at", "run_id", "created_by"}
         }
     if isinstance(value, list):
         return [_canonical_payload(item) for item in value]
@@ -245,11 +325,185 @@ class Store:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.executescript(SCHEMA_SQL)
+        self._migrate_legacy_schema()
+        self.conn.executescript(TRIGGER_SQL)
+        self.conn.execute(
+            "INSERT OR IGNORE INTO schema_migration(version, applied_at) VALUES (?, ?)",
+            (2, datetime.utcnow().isoformat()),
+        )
+        self.conn.execute(
+            "INSERT OR IGNORE INTO schema_migration(version, applied_at) VALUES (?, ?)",
+            (3, datetime.utcnow().isoformat()),
+        )
+        self.conn.commit()
+
+    def _table_columns(self, table: str) -> set[str]:
+        return {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+    def _has_primary_key(self, table: str, expected: Sequence[str]) -> bool:
+        rows = sorted(
+            (row["pk"], row["name"])
+            for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+            if row["pk"]
+        )
+        return [name for _, name in rows] == list(expected)
+
+    def _migrate_legacy_schema(self) -> None:
+        """Migrate the Stage A database before installing append-only triggers."""
+        # An intermediate Phase A+ database may already have the new trigger
+        # names.  Remove them while rebuilding legacy tables; they are
+        # installed again immediately after migration completes.
+        self.conn.executescript(
+            """
+            DROP TRIGGER IF EXISTS prevent_evidence_update;
+            DROP TRIGGER IF EXISTS prevent_evidence_delete;
+            DROP TRIGGER IF EXISTS prevent_viewpoint_update;
+            DROP TRIGGER IF EXISTS prevent_viewpoint_delete;
+            """
+        )
+        evidence_columns = self._table_columns("evidence")
+        if "case_id" not in evidence_columns:
+            self.conn.execute(
+                "ALTER TABLE evidence ADD COLUMN case_id TEXT NOT NULL DEFAULT '__legacy__'"
+            )
+            configured = [row["case_id"] for row in self.conn.execute("SELECT case_id FROM case_config").fetchall()]
+            legacy_case = configured[0] if len(configured) == 1 else "__legacy__"
+            self.conn.execute("UPDATE evidence SET case_id=? WHERE case_id='__legacy__'", (legacy_case,))
+            evidence_columns.add("case_id")
+        for column, definition in (
+            ("evidence_nature", "TEXT NOT NULL DEFAULT 'legacy_unclassified'"),
+            ("excerpt_original", "TEXT NOT NULL DEFAULT ''"),
+            ("excerpt_zh", "TEXT NOT NULL DEFAULT ''"),
+            ("coding_dimensions_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ):
+            if column not in evidence_columns:
+                self.conn.execute(f"ALTER TABLE evidence ADD COLUMN {column} {definition}")
+                evidence_columns.add(column)
+        for row in self.conn.execute("SELECT evidence_id, version, case_id, payload_json FROM evidence").fetchall():
+            payload = json.loads(row["payload_json"])
+            changed = False
+            defaults = {
+                "case_id": row["case_id"],
+                "evidence_nature": "legacy_unclassified",
+                "excerpt_original": "",
+                "excerpt_zh": "",
+                "coding_dimensions": [],
+            }
+            for key, value in defaults.items():
+                if key not in payload:
+                    payload[key] = value
+                    changed = True
+            if changed:
+                self.conn.execute(
+                    "UPDATE evidence SET payload_json=?, evidence_nature=?, excerpt_original=?, excerpt_zh=?, coding_dimensions_json=? "
+                    "WHERE evidence_id=? AND version=?",
+                    (
+                        _json(payload),
+                        payload["evidence_nature"],
+                        payload["excerpt_original"],
+                        payload["excerpt_zh"],
+                        _json(payload["coding_dimensions"]),
+                        row["evidence_id"],
+                        row["version"],
+                    ),
+                )
+        # Backfill fields introduced by the hardening schema so replaying an
+        # old idempotent fixture does not look like a conflicting write.
+        if "payload_json" in self._table_columns("evidence_dependency"):
+            for row in self.conn.execute("SELECT edge_id, payload_json FROM evidence_dependency").fetchall():
+                payload = json.loads(row["payload_json"])
+                if "changed_fields" not in payload:
+                    payload["changed_fields"] = []
+                    self.conn.execute(
+                        "UPDATE evidence_dependency SET payload_json=? WHERE edge_id=?",
+                        (_json(payload), row["edge_id"]),
+                    )
+
+        needs_case_scoped_rebuild = (
+            not self._has_primary_key("evidence", ["case_id", "evidence_id", "version"])
+            or "case_id" not in self._table_columns("snapshot_items")
+            or "case_id" not in self._table_columns("evidence_dependency")
+        )
+        if needs_case_scoped_rebuild:
+            self._rebuild_case_scoped_tables()
+        # These tables were added by Phase A+; CREATE IF NOT EXISTS above handles
+        # new databases, while this branch documents the migration boundary.
         self.conn.execute(
             "INSERT OR IGNORE INTO schema_migration(version, applied_at) VALUES (?, ?)",
             (1, datetime.utcnow().isoformat()),
         )
+
+    def _rebuild_case_scoped_tables(self) -> None:
+        """Rebuild the Stage A tables whose foreign keys now include case_id."""
         self.conn.commit()
+        self.conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            self.conn.execute("ALTER TABLE evidence RENAME TO evidence_legacy")
+            self.conn.execute("ALTER TABLE snapshot_items RENAME TO snapshot_items_legacy")
+            self.conn.execute("ALTER TABLE evidence_dependency RENAME TO evidence_dependency_legacy")
+            self.conn.executescript(
+                """
+                CREATE TABLE evidence (
+                    case_id TEXT NOT NULL,
+                    evidence_id TEXT NOT NULL,
+                    version INTEGER NOT NULL CHECK(version >= 1),
+                    snapshot_tag TEXT NOT NULL CHECK(snapshot_tag IN ('T0', 'T1')),
+                    status TEXT NOT NULL,
+                    published_at TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    evidence_nature TEXT NOT NULL DEFAULT 'legacy_unclassified',
+                    excerpt_original TEXT NOT NULL DEFAULT '',
+                    excerpt_zh TEXT NOT NULL DEFAULT '',
+                    coding_dimensions_json TEXT NOT NULL DEFAULT '[]',
+                    payload_json TEXT NOT NULL,
+                    PRIMARY KEY (case_id, evidence_id, version)
+                );
+                CREATE TABLE snapshot_items (
+                    snapshot_id TEXT NOT NULL,
+                    case_id TEXT NOT NULL,
+                    evidence_id TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    PRIMARY KEY(snapshot_id, case_id, evidence_id, version),
+                    FOREIGN KEY(snapshot_id) REFERENCES evidence_snapshot(snapshot_id),
+                    FOREIGN KEY(case_id, evidence_id, version) REFERENCES evidence(case_id, evidence_id, version)
+                );
+                CREATE TABLE evidence_dependency (
+                    edge_id TEXT PRIMARY KEY,
+                    case_id TEXT NOT NULL,
+                    evidence_id TEXT NOT NULL,
+                    evidence_version INTEGER NOT NULL,
+                    viewpoint_id TEXT NOT NULL,
+                    viewpoint_version INTEGER NOT NULL,
+                    relation TEXT NOT NULL,
+                    importance TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    FOREIGN KEY(case_id, evidence_id, evidence_version) REFERENCES evidence(case_id, evidence_id, version),
+                    FOREIGN KEY(viewpoint_id, viewpoint_version) REFERENCES viewpoint(viewpoint_id, version)
+                );
+                """
+            )
+            self.conn.execute(
+                "INSERT INTO evidence(case_id, evidence_id, version, snapshot_tag, status, published_at, content_hash, evidence_nature, excerpt_original, excerpt_zh, coding_dimensions_json, payload_json) "
+                "SELECT case_id, evidence_id, version, snapshot_tag, status, published_at, content_hash, evidence_nature, excerpt_original, excerpt_zh, coding_dimensions_json, payload_json FROM evidence_legacy"
+            )
+            self.conn.execute(
+                "INSERT INTO snapshot_items(snapshot_id, case_id, evidence_id, version) "
+                "SELECT i.snapshot_id, s.case_id, i.evidence_id, i.version "
+                "FROM snapshot_items_legacy i JOIN evidence_snapshot s ON s.snapshot_id=i.snapshot_id"
+            )
+            self.conn.execute(
+                "INSERT INTO evidence_dependency(edge_id, case_id, evidence_id, evidence_version, viewpoint_id, viewpoint_version, relation, importance, payload_json) "
+                "SELECT d.edge_id, s.case_id, d.evidence_id, d.evidence_version, d.viewpoint_id, d.viewpoint_version, d.relation, d.importance, d.payload_json "
+                "FROM evidence_dependency_legacy d "
+                "JOIN viewpoint v ON v.viewpoint_id=d.viewpoint_id AND v.version=d.viewpoint_version "
+                "JOIN evidence_snapshot s ON s.snapshot_id=v.snapshot_id"
+            )
+            self.conn.execute("DROP TABLE evidence_dependency_legacy")
+            self.conn.execute("DROP TABLE snapshot_items_legacy")
+            self.conn.execute("DROP TABLE evidence_legacy")
+            self.conn.commit()
+        finally:
+            self.conn.execute("PRAGMA foreign_keys=ON")
 
     def close(self) -> None:
         self.conn.close()
@@ -286,18 +540,64 @@ class Store:
     def record_model_run(
         self, run_id: str, case_id: str, phase: str, generator_type: str, payload: Dict[str, Any]
     ) -> None:
+        """Backward-compatible name; writes an append-only pipeline stage."""
+        row = self.conn.execute("SELECT case_id FROM pipeline_run WHERE run_id=?", (run_id,)).fetchone()
+        if row and row["case_id"] != case_id:
+            raise StorageError(f"Pipeline run {run_id} belongs to another case")
+        if not row:
+            self.record_pipeline_run(run_id, case_id, phase, {"generator_type": generator_type})
+        self.record_pipeline_stage(
+            run_id=run_id,
+            case_id=case_id,
+            phase=phase,
+            stage_name=generator_type,
+            payload=payload,
+        )
+
+    def record_pipeline_run(self, run_id: str, case_id: str, phase: str, payload: Dict[str, Any]) -> None:
+        row = self.conn.execute("SELECT * FROM pipeline_run WHERE run_id=?", (run_id,)).fetchone()
+        data = _json(payload)
+        if row:
+            if row["case_id"] != case_id or row["phase"] != phase or _canonical_payload(json.loads(row["payload_json"])) != _canonical_payload(payload):
+                raise StorageError(f"Pipeline run {run_id} already exists with different content")
+            return
         self.conn.execute(
-            "INSERT OR REPLACE INTO model_run(run_id, case_id, phase, generator_type, payload_json) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (run_id, case_id, phase, generator_type, _json(payload)),
+            "INSERT INTO pipeline_run(run_id, case_id, phase, created_at, payload_json) VALUES (?, ?, ?, ?, ?)",
+            (run_id, case_id, phase, datetime.utcnow().isoformat(), data),
         )
         self.conn.commit()
 
+    def record_pipeline_stage(
+        self, *, run_id: str, case_id: str, phase: str, stage_name: str, payload: Dict[str, Any]
+    ) -> str:
+        stage_id = f"STAGE-{run_id}-{stable_hash([stage_name, payload, datetime.utcnow().isoformat()])[:16]}"
+        self.conn.execute(
+            "INSERT INTO pipeline_stage(stage_id, run_id, case_id, phase, stage_name, created_at, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (stage_id, run_id, case_id, phase, stage_name, datetime.utcnow().isoformat(), _json(payload)),
+        )
+        self.conn.commit()
+        return stage_id
+
+    def record_model_call(self, *, run_id: str, case_id: str, phase: str, payload: Dict[str, Any]) -> str:
+        call_id = f"CALL-{run_id}-{stable_hash([payload, datetime.utcnow().isoformat()])[:16]}"
+        self.conn.execute(
+            "INSERT INTO model_call(call_id, run_id, case_id, phase, created_at, payload_json) VALUES (?, ?, ?, ?, ?, ?)",
+            (call_id, run_id, case_id, phase, datetime.utcnow().isoformat(), _json(payload)),
+        )
+        self.conn.commit()
+        return call_id
+
     def record_human_review(self, review: Any) -> None:
         data = model_dump(review)
+        row = self.conn.execute(
+            "SELECT payload_json FROM human_review WHERE review_id=?", (data["review_id"],)
+        ).fetchone()
+        if row:
+            if _canonical_payload(json.loads(row["payload_json"])) != _canonical_payload(data):
+                raise StorageError(f"Human review {data['review_id']} already exists with different content")
+            return
         self.conn.execute(
-            "INSERT OR REPLACE INTO human_review(review_id, gate, case_id, approved, payload_json) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO human_review(review_id, gate, case_id, approved, payload_json) VALUES (?, ?, ?, ?, ?)",
             (data["review_id"], data["gate"], data["case_id"], int(data["approved"]), _json(data)),
         )
         self.conn.commit()
@@ -306,8 +606,8 @@ class Store:
         evidence = with_evidence_hash(evidence)
         data = model_dump(evidence)
         row = self.conn.execute(
-            "SELECT payload_json FROM evidence WHERE evidence_id=? AND version=?",
-            (evidence.evidence_id, evidence.version),
+            "SELECT payload_json FROM evidence WHERE case_id=? AND evidence_id=? AND version=?",
+            (evidence.case_id, evidence.evidence_id, evidence.version),
         ).fetchone()
         if row:
             existing_data = json.loads(row["payload_json"])
@@ -322,40 +622,54 @@ class Store:
                 )
             return model_validate(Evidence, existing_data)  # type: ignore[return-value]
         self.conn.execute(
-            "INSERT INTO evidence(evidence_id, version, snapshot_tag, status, published_at, content_hash, payload_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO evidence(case_id, evidence_id, version, snapshot_tag, status, published_at, content_hash, evidence_nature, excerpt_original, excerpt_zh, coding_dimensions_json, payload_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
+                evidence.case_id,
                 evidence.evidence_id,
                 evidence.version,
                 evidence.snapshot_tag.value,
                 evidence.status.value,
                 evidence.published_at.isoformat(),
                 evidence.content_hash,
+                evidence.evidence_nature,
+                evidence.excerpt_original,
+                evidence.excerpt_zh,
+                _json(evidence.coding_dimensions),
                 _json(data),
             ),
         )
         self.conn.commit()
         return evidence
 
-    def get_evidence(self, evidence_id: str, version: int) -> Optional[Evidence]:
-        row = self.conn.execute(
-            "SELECT payload_json FROM evidence WHERE evidence_id=? AND version=?",
-            (evidence_id, version),
-        ).fetchone()
+    def get_evidence(self, evidence_id: str, version: int, case_id: Optional[str] = None) -> Optional[Evidence]:
+        if case_id:
+            row = self.conn.execute(
+                "SELECT payload_json FROM evidence WHERE evidence_id=? AND version=? AND case_id=?",
+                (evidence_id, version, case_id),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT payload_json FROM evidence WHERE evidence_id=? AND version=? ORDER BY case_id LIMIT 1",
+                (evidence_id, version),
+            ).fetchone()
         return model_validate(Evidence, _read_payload(row)) if row else None  # type: ignore[return-value]
 
-    def list_evidence(self, *, tags: Optional[Sequence[SnapshotTag]] = None) -> List[Evidence]:
+    def list_evidence(self, *, tags: Optional[Sequence[SnapshotTag]] = None, case_id: Optional[str] = None) -> List[Evidence]:
+        conditions: List[str] = []
+        params: List[Any] = []
         if tags:
             placeholders = ",".join("?" for _ in tags)
-            rows = self.conn.execute(
-                f"SELECT payload_json FROM evidence WHERE snapshot_tag IN ({placeholders}) "
-                "ORDER BY published_at, evidence_id, version",
-                [tag.value for tag in tags],
-            ).fetchall()
-        else:
-            rows = self.conn.execute(
-                "SELECT payload_json FROM evidence ORDER BY published_at, evidence_id, version"
-            ).fetchall()
+            conditions.append(f"snapshot_tag IN ({placeholders})")
+            params.extend(tag.value for tag in tags)
+        if case_id:
+            conditions.append("case_id=?")
+            params.append(case_id)
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        rows = self.conn.execute(
+            "SELECT payload_json FROM evidence" + where + " ORDER BY published_at, evidence_id, version",
+            params,
+        ).fetchall()
         return [model_validate(Evidence, _read_payload(row)) for row in rows]  # type: ignore[list-item]
 
     def create_snapshot(
@@ -372,17 +686,21 @@ class Store:
         refs = sorted(set(evidence_versions))
         if not refs:
             raise StorageError("Cannot freeze an empty evidence snapshot")
-        existing = self.get_snapshot(snapshot_id)
+        existing = self.get_snapshot(snapshot_id, case_id)
         if existing:
+            if not existing.frozen:
+                raise StorageError(f"Snapshot {snapshot_id} is already being built and is not resumable")
             if existing.evidence_versions != refs or existing.manifest_hash != stable_hash(refs):
                 raise StorageError(f"Snapshot {snapshot_id} already exists with different content")
             return existing
         evidence_objects: List[Evidence] = []
         for ref in refs:
             evidence_id, version = parse_evidence_ref(ref)
-            evidence = self.get_evidence(evidence_id, version)
+            evidence = self.get_evidence(evidence_id, version, case_id)
             if evidence is None:
                 raise StorageError(f"Snapshot references missing evidence: {ref}")
+            if evidence.case_id != case_id:
+                raise StorageError(f"Evidence belongs to another case: {ref}")
             if phase == SnapshotTag.T0 and evidence.snapshot_tag != SnapshotTag.T0:
                 raise StorageError(f"T0 snapshot cannot contain {evidence.snapshot_tag.value} evidence: {ref}")
             if evidence.published_at.isoformat() > cutoff_time.date().isoformat():
@@ -391,46 +709,69 @@ class Store:
         if phase == SnapshotTag.T1 and not any(e.snapshot_tag == SnapshotTag.T1 for e in evidence_objects):
             raise StorageError("T1 snapshot must contain at least one T1 evidence item")
         manifest_hash = stable_hash(refs)
-        snapshot = EvidenceSnapshot(
+        draft = EvidenceSnapshot(
             snapshot_id=snapshot_id,
             case_id=case_id,
             phase=phase,
             cutoff_time=cutoff_time,
             evidence_versions=refs,
             manifest_hash=manifest_hash,
-            frozen=True,
+            frozen=False,
             frozen_by=frozen_by,
             run_id=run_id,
         )
-        data = model_dump(snapshot)
+        draft_data = model_dump(draft)
         with self.transaction():
             self.conn.execute(
                 "INSERT INTO evidence_snapshot(snapshot_id, case_id, phase, cutoff_time, manifest_hash, frozen, frozen_at, frozen_by, payload_json) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    snapshot.snapshot_id,
-                    snapshot.case_id,
-                    snapshot.phase.value,
-                    snapshot.cutoff_time.isoformat(),
-                    snapshot.manifest_hash,
-                    int(snapshot.frozen),
-                    snapshot.frozen_at.isoformat(),
-                    snapshot.frozen_by,
-                    _json(data),
+                    draft.snapshot_id,
+                    draft.case_id,
+                    draft.phase.value,
+                    draft.cutoff_time.isoformat(),
+                    draft.manifest_hash,
+                    int(draft.frozen),
+                    draft.frozen_at.isoformat(),
+                    draft.frozen_by,
+                    _json(draft_data),
                 ),
             )
             for ref in refs:
                 evidence_id, version = parse_evidence_ref(ref)
                 self.conn.execute(
-                    "INSERT INTO snapshot_items(snapshot_id, evidence_id, version) VALUES (?, ?, ?)",
-                    (snapshot.snapshot_id, evidence_id, version),
+                    "INSERT INTO snapshot_items(snapshot_id, case_id, evidence_id, version) VALUES (?, ?, ?, ?)",
+                    (draft.snapshot_id, case_id, evidence_id, version),
                 )
-        return snapshot
+            actual_refs = [
+                evidence_ref(row["evidence_id"], row["version"])
+                for row in self.conn.execute(
+                    "SELECT evidence_id, version FROM snapshot_items WHERE snapshot_id=? ORDER BY evidence_id, version",
+                    (snapshot_id,),
+                ).fetchall()
+            ]
+            if actual_refs != refs or stable_hash(actual_refs) != manifest_hash:
+                raise StorageError(f"Snapshot {snapshot_id} manifest verification failed before freeze")
+            frozen_data = dict(draft_data)
+            frozen_data["frozen"] = True
+            frozen_data["frozen_at"] = datetime.utcnow().isoformat()
+            frozen = model_validate(EvidenceSnapshot, frozen_data)
+            self.conn.execute(
+                "UPDATE evidence_snapshot SET frozen=1, frozen_at=?, payload_json=? WHERE snapshot_id=?",
+                (frozen.frozen_at.isoformat(), _json(model_dump(frozen)), snapshot_id),
+            )
+        return frozen  # type: ignore[return-value]
 
-    def get_snapshot(self, snapshot_id: str) -> Optional[EvidenceSnapshot]:
-        row = self.conn.execute(
-            "SELECT payload_json FROM evidence_snapshot WHERE snapshot_id=?", (snapshot_id,)
-        ).fetchone()
+    def get_snapshot(self, snapshot_id: str, case_id: Optional[str] = None) -> Optional[EvidenceSnapshot]:
+        if case_id:
+            row = self.conn.execute(
+                "SELECT payload_json FROM evidence_snapshot WHERE snapshot_id=? AND case_id=?",
+                (snapshot_id, case_id),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT payload_json FROM evidence_snapshot WHERE snapshot_id=?", (snapshot_id,)
+            ).fetchone()
         return model_validate(EvidenceSnapshot, _read_payload(row)) if row else None  # type: ignore[return-value]
 
     def list_snapshots(self, case_id: Optional[str] = None) -> List[EvidenceSnapshot]:
@@ -469,16 +810,24 @@ class Store:
                     (hypothesis.hypothesis_id, hypothesis.snapshot_id, int(hypothesis.frozen), _json(data)),
                 )
 
-    def list_hypotheses(self, snapshot_id: str) -> List[Hypothesis]:
-        rows = self.conn.execute(
-            "SELECT payload_json FROM hypothesis WHERE snapshot_id=? ORDER BY hypothesis_id",
-            (snapshot_id,),
-        ).fetchall()
+    def list_hypotheses(self, snapshot_id: str, case_id: Optional[str] = None) -> List[Hypothesis]:
+        if case_id:
+            rows = self.conn.execute(
+                "SELECT h.payload_json FROM hypothesis h JOIN evidence_snapshot s ON h.snapshot_id=s.snapshot_id "
+                "WHERE h.snapshot_id=? AND s.case_id=? ORDER BY h.hypothesis_id",
+                (snapshot_id, case_id),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT payload_json FROM hypothesis WHERE snapshot_id=? ORDER BY hypothesis_id",
+                (snapshot_id,),
+            ).fetchall()
         return [model_validate(Hypothesis, _read_payload(row)) for row in rows]  # type: ignore[list-item]
 
     def snapshot_contains(self, snapshot_id: str, evidence_id: str, version: int) -> bool:
         row = self.conn.execute(
-            "SELECT 1 FROM snapshot_items WHERE snapshot_id=? AND evidence_id=? AND version=?",
+            "SELECT 1 FROM snapshot_items i JOIN evidence_snapshot s ON s.snapshot_id=i.snapshot_id "
+            "WHERE i.snapshot_id=? AND i.case_id=s.case_id AND i.evidence_id=? AND i.version=?",
             (snapshot_id, evidence_id, version),
         ).fetchone()
         return row is not None
@@ -536,37 +885,58 @@ class Store:
         )
         self.conn.commit()
 
-    def get_viewpoint(self, viewpoint_id: str, version: int) -> Optional[Viewpoint]:
-        row = self.conn.execute(
-            "SELECT payload_json FROM viewpoint WHERE viewpoint_id=? AND version=?",
-            (viewpoint_id, version),
-        ).fetchone()
-        return model_validate(Viewpoint, _read_payload(row)) if row else None  # type: ignore[return-value]
-
-    def latest_viewpoint(self, viewpoint_id: str) -> Optional[Viewpoint]:
-        row = self.conn.execute(
-            "SELECT payload_json FROM viewpoint WHERE viewpoint_id=? ORDER BY version DESC LIMIT 1",
-            (viewpoint_id,),
-        ).fetchone()
-        return model_validate(Viewpoint, _read_payload(row)) if row else None  # type: ignore[return-value]
-
-    def list_viewpoints(self, snapshot_id: Optional[str] = None) -> List[Viewpoint]:
-        if snapshot_id:
-            rows = self.conn.execute(
-                "SELECT payload_json FROM viewpoint WHERE snapshot_id=? ORDER BY viewpoint_id, version",
-                (snapshot_id,),
-            ).fetchall()
+    def get_viewpoint(self, viewpoint_id: str, version: int, case_id: Optional[str] = None) -> Optional[Viewpoint]:
+        if case_id:
+            row = self.conn.execute(
+                "SELECT v.payload_json FROM viewpoint v JOIN evidence_snapshot s ON v.snapshot_id=s.snapshot_id "
+                "WHERE v.viewpoint_id=? AND v.version=? AND s.case_id=?",
+                (viewpoint_id, version, case_id),
+            ).fetchone()
         else:
-            rows = self.conn.execute(
-                "SELECT payload_json FROM viewpoint ORDER BY viewpoint_id, version"
-            ).fetchall()
+            row = self.conn.execute(
+                "SELECT payload_json FROM viewpoint WHERE viewpoint_id=? AND version=?",
+                (viewpoint_id, version),
+            ).fetchone()
+        return model_validate(Viewpoint, _read_payload(row)) if row else None  # type: ignore[return-value]
+
+    def latest_viewpoint(self, viewpoint_id: str, case_id: Optional[str] = None) -> Optional[Viewpoint]:
+        if case_id:
+            row = self.conn.execute(
+                "SELECT v.payload_json FROM viewpoint v JOIN evidence_snapshot s ON v.snapshot_id=s.snapshot_id "
+                "WHERE v.viewpoint_id=? AND s.case_id=? ORDER BY v.version DESC LIMIT 1",
+                (viewpoint_id, case_id),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT payload_json FROM viewpoint WHERE viewpoint_id=? ORDER BY version DESC LIMIT 1",
+                (viewpoint_id,),
+            ).fetchone()
+        return model_validate(Viewpoint, _read_payload(row)) if row else None  # type: ignore[return-value]
+
+    def list_viewpoints(self, snapshot_id: Optional[str] = None, case_id: Optional[str] = None) -> List[Viewpoint]:
+        conditions: List[str] = []
+        params: List[Any] = []
+        if snapshot_id:
+            conditions.append("v.snapshot_id=?")
+            params.append(snapshot_id)
+        if case_id:
+            conditions.append("s.case_id=?")
+            params.append(case_id)
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        rows = self.conn.execute(
+            "SELECT v.payload_json FROM viewpoint v JOIN evidence_snapshot s ON v.snapshot_id=s.snapshot_id" + where + " ORDER BY v.viewpoint_id, v.version",
+            params,
+        ).fetchall()
         return [model_validate(Viewpoint, _read_payload(row)) for row in rows]  # type: ignore[list-item]
 
     def insert_dependency(self, dependency: EvidenceDependency) -> None:
-        evidence = self.get_evidence(dependency.evidence_id, dependency.evidence_version)
         viewpoint = self.get_viewpoint(dependency.viewpoint_id, dependency.viewpoint_version)
-        if not evidence or not viewpoint:
+        if not viewpoint:
             raise StorageError("Dependency must reference existing evidence and viewpoint versions")
+        snapshot = self.get_snapshot(viewpoint.snapshot_id)
+        evidence = self.get_evidence(dependency.evidence_id, dependency.evidence_version, snapshot.case_id if snapshot else None)
+        if not snapshot or not evidence or evidence.case_id != snapshot.case_id:
+            raise StorageError("Dependency evidence and viewpoint must belong to the same case")
         if not self.snapshot_contains(viewpoint.snapshot_id, dependency.evidence_id, dependency.evidence_version):
             raise StorageError("Dependency evidence must be present in the viewpoint snapshot")
         data = model_dump(dependency)
@@ -578,10 +948,11 @@ class Store:
                 raise StorageError(f"Dependency {dependency.edge_id} already exists with different content")
             return
         self.conn.execute(
-            "INSERT INTO evidence_dependency(edge_id, evidence_id, evidence_version, viewpoint_id, viewpoint_version, relation, importance, payload_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO evidence_dependency(edge_id, case_id, evidence_id, evidence_version, viewpoint_id, viewpoint_version, relation, importance, payload_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 dependency.edge_id,
+                snapshot.case_id,
                 dependency.evidence_id,
                 dependency.evidence_version,
                 dependency.viewpoint_id,
@@ -593,11 +964,29 @@ class Store:
         )
         self.conn.commit()
 
-    def list_dependencies(self, *, viewpoint_id: Optional[str] = None) -> List[EvidenceDependency]:
-        if viewpoint_id:
+    def list_dependencies(
+        self,
+        *,
+        viewpoint_id: Optional[str] = None,
+        viewpoint_version: Optional[int] = None,
+        case_id: Optional[str] = None,
+    ) -> List[EvidenceDependency]:
+        if viewpoint_id or viewpoint_version or case_id:
+            conditions: List[str] = []
+            params: List[Any] = []
+            if viewpoint_id:
+                conditions.append("d.viewpoint_id=?")
+                params.append(viewpoint_id)
+            if viewpoint_version:
+                conditions.append("d.viewpoint_version=?")
+                params.append(viewpoint_version)
+            if case_id:
+                conditions.append("s.case_id=?")
+                params.append(case_id)
             rows = self.conn.execute(
-                "SELECT payload_json FROM evidence_dependency WHERE viewpoint_id=? ORDER BY edge_id",
-                (viewpoint_id,),
+                "SELECT d.payload_json FROM evidence_dependency d JOIN viewpoint v ON d.viewpoint_id=v.viewpoint_id AND d.viewpoint_version=v.version "
+                "JOIN evidence_snapshot s ON v.snapshot_id=s.snapshot_id WHERE " + " AND ".join(conditions) + " ORDER BY d.edge_id",
+                params,
             ).fetchall()
         else:
             rows = self.conn.execute(
@@ -606,7 +995,8 @@ class Store:
         return [model_validate(EvidenceDependency, _read_payload(row)) for row in rows]  # type: ignore[list-item]
 
     def insert_disagreement(self, disagreement: Disagreement) -> None:
-        if not self.get_snapshot(disagreement.snapshot_id):
+        snapshot = self.get_snapshot(disagreement.snapshot_id)
+        if not snapshot:
             raise StorageError("Disagreement must reference an existing snapshot")
         if len(disagreement.viewpoint_refs) < 2:
             raise StorageError("Disagreement must connect at least two viewpoint versions")
@@ -614,7 +1004,8 @@ class Store:
             if ":" not in ref:
                 raise StorageError(f"Invalid viewpoint reference: {ref}")
             vp_id, version_text = ref.rsplit(":", 1)
-            if not self.get_viewpoint(vp_id, int(version_text)):
+            viewpoint = self.get_viewpoint(vp_id, int(version_text), snapshot.case_id)
+            if not viewpoint or viewpoint.snapshot_id != disagreement.snapshot_id:
                 raise StorageError(f"Disagreement references missing viewpoint: {ref}")
         data = model_dump(disagreement)
         row = self.conn.execute(
@@ -637,11 +1028,18 @@ class Store:
         )
         self.conn.commit()
 
-    def list_disagreements(self, snapshot_id: str) -> List[Disagreement]:
-        rows = self.conn.execute(
-            "SELECT payload_json FROM disagreement WHERE snapshot_id=? ORDER BY disagreement_id",
-            (snapshot_id,),
-        ).fetchall()
+    def list_disagreements(self, snapshot_id: str, case_id: Optional[str] = None) -> List[Disagreement]:
+        if case_id:
+            rows = self.conn.execute(
+                "SELECT d.payload_json FROM disagreement d JOIN evidence_snapshot s ON d.snapshot_id=s.snapshot_id "
+                "WHERE d.snapshot_id=? AND s.case_id=? ORDER BY d.disagreement_id",
+                (snapshot_id, case_id),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT payload_json FROM disagreement WHERE snapshot_id=? ORDER BY disagreement_id",
+                (snapshot_id,),
+            ).fetchall()
         return [model_validate(Disagreement, _read_payload(row)) for row in rows]  # type: ignore[list-item]
 
     def insert_need(self, need: DiscriminativeNeed) -> None:
@@ -663,16 +1061,21 @@ class Store:
         )
         self.conn.commit()
 
-    def list_needs(self, disagreement_id: Optional[str] = None) -> List[DiscriminativeNeed]:
+    def list_needs(self, disagreement_id: Optional[str] = None, case_id: Optional[str] = None) -> List[DiscriminativeNeed]:
+        conditions: List[str] = []
+        params: List[Any] = []
         if disagreement_id:
-            rows = self.conn.execute(
-                "SELECT payload_json FROM discriminative_need WHERE disagreement_id=? ORDER BY need_id",
-                (disagreement_id,),
-            ).fetchall()
-        else:
-            rows = self.conn.execute(
-                "SELECT payload_json FROM discriminative_need ORDER BY need_id"
-            ).fetchall()
+            conditions.append("n.disagreement_id=?")
+            params.append(disagreement_id)
+        if case_id:
+            conditions.append("s.case_id=?")
+            params.append(case_id)
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        rows = self.conn.execute(
+            "SELECT n.payload_json FROM discriminative_need n JOIN disagreement d ON n.disagreement_id=d.disagreement_id "
+            "JOIN evidence_snapshot s ON d.snapshot_id=s.snapshot_id" + where + " ORDER BY n.need_id",
+            params,
+        ).fetchall()
         return [model_validate(DiscriminativeNeed, _read_payload(row)) for row in rows]  # type: ignore[list-item]
 
     def insert_indicator(self, indicator: MonitorIndicator) -> None:
@@ -694,13 +1097,19 @@ class Store:
         )
         self.conn.commit()
 
-    def list_indicators(self, *, approved_only: bool = False) -> List[MonitorIndicator]:
-        query = "SELECT payload_json FROM monitor_indicator"
-        params: Tuple[Any, ...] = ()
+    def list_indicators(self, *, approved_only: bool = False, case_id: Optional[str] = None) -> List[MonitorIndicator]:
+        query = "SELECT i.payload_json FROM monitor_indicator i JOIN discriminative_need n ON i.need_id=n.need_id "
+        query += "JOIN disagreement d ON n.disagreement_id=d.disagreement_id JOIN evidence_snapshot s ON d.snapshot_id=s.snapshot_id"
+        conditions: List[str] = []
+        params: List[Any] = []
         if approved_only:
-            query += " WHERE status=?"
-            params = (IndicatorStatus.APPROVED.value,)
-        query += " ORDER BY indicator_id"
+            conditions.append("i.status=?")
+            params.append(IndicatorStatus.APPROVED.value)
+        if case_id:
+            conditions.append("s.case_id=?")
+            params.append(case_id)
+        query += (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        query += " ORDER BY i.indicator_id"
         rows = self.conn.execute(query, params).fetchall()
         return [model_validate(MonitorIndicator, _read_payload(row)) for row in rows]  # type: ignore[list-item]
 
@@ -723,17 +1132,28 @@ class Store:
         )
         self.conn.commit()
 
-    def list_triggers(self, *, approved_only: bool = False) -> List[TriggerRule]:
-        query = "SELECT payload_json FROM trigger_rule"
-        params: Tuple[Any, ...] = ()
+    def list_triggers(self, *, approved_only: bool = False, case_id: Optional[str] = None) -> List[TriggerRule]:
+        query = "SELECT t.payload_json FROM trigger_rule t JOIN monitor_indicator i ON t.indicator_id=i.indicator_id "
+        query += "JOIN discriminative_need n ON i.need_id=n.need_id JOIN disagreement d ON n.disagreement_id=d.disagreement_id "
+        query += "JOIN evidence_snapshot s ON d.snapshot_id=s.snapshot_id"
+        conditions: List[str] = []
+        params: List[Any] = []
         if approved_only:
-            query += " WHERE status=?"
-            params = (IndicatorStatus.APPROVED.value,)
-        query += " ORDER BY trigger_id"
+            conditions.append("t.status=?")
+            params.append(IndicatorStatus.APPROVED.value)
+        if case_id:
+            conditions.append("s.case_id=?")
+            params.append(case_id)
+        query += (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        query += " ORDER BY t.trigger_id"
         rows = self.conn.execute(query, params).fetchall()
         return [model_validate(TriggerRule, _read_payload(row)) for row in rows]  # type: ignore[list-item]
 
     def insert_update_event(self, event: UpdateEvent) -> None:
+        from_snapshot = self.get_snapshot(event.from_snapshot, event.case_id)
+        to_snapshot = self.get_snapshot(event.to_snapshot, event.case_id)
+        if not from_snapshot or not to_snapshot:
+            raise StorageError("Update event snapshots must belong to the event case")
         data = model_dump(event)
         row = self.conn.execute(
             "SELECT payload_json FROM update_event WHERE update_id=?", (event.update_id,)
@@ -757,9 +1177,14 @@ class Store:
     def record_artifact(
         self, *, artifact_id: str, case_id: str, artifact_type: str, path: str, content_hash: str, payload: Dict[str, Any]
     ) -> None:
+        row = self.conn.execute("SELECT payload_json FROM artifact WHERE artifact_id=?", (artifact_id,)).fetchone()
+        data = _json(payload)
+        if row:
+            if _canonical_payload(json.loads(row["payload_json"])) != _canonical_payload(payload):
+                raise StorageError(f"Artifact {artifact_id} already exists with different content")
+            return
         self.conn.execute(
-            "INSERT OR REPLACE INTO artifact(artifact_id, case_id, artifact_type, path, content_hash, payload_json) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (artifact_id, case_id, artifact_type, path, content_hash, _json(payload)),
+            "INSERT INTO artifact(artifact_id, case_id, artifact_type, path, content_hash, payload_json) VALUES (?, ?, ?, ?, ?, ?)",
+            (artifact_id, case_id, artifact_type, path, content_hash, data),
         )
         self.conn.commit()

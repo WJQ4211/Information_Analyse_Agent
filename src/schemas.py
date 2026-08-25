@@ -163,6 +163,7 @@ class EvidenceCitation(SchemaBase):
 
 
 class Evidence(SchemaBase):
+    case_id: str = Field(min_length=1)
     evidence_id: str = Field(min_length=1)
     version: int = Field(default=1, ge=1)
     snapshot_tag: SnapshotTag
@@ -176,7 +177,11 @@ class Evidence(SchemaBase):
     url_or_path: str = Field(min_length=1)
     page_or_section: Optional[str] = None
     excerpt: str = Field(min_length=1)
+    excerpt_original: str = ""
+    excerpt_zh: str = ""
     normalized_claim: str = Field(min_length=1)
+    evidence_nature: str = "legacy_unclassified"
+    coding_dimensions: List[str] = Field(default_factory=list)
     topics: List[str] = Field(default_factory=list)
     status: EvidenceStatus = EvidenceStatus.ACTIVE
     content_hash: str = ""
@@ -241,9 +246,24 @@ class EvidenceDependency(SchemaBase):
     importance: Importance
     created_by: str = Field(min_length=1)
     human_verified: bool = False
+    changed_fields: List[str] = Field(default_factory=list)
 
     @property
     def evidence_ref(self) -> str:
+        return evidence_ref(self.evidence_id, self.evidence_version)
+
+
+class TriggerRelation(SchemaBase):
+    """A T1 evidence relation attached to fields changed in a new viewpoint."""
+
+    evidence_id: str = Field(min_length=1)
+    evidence_version: int = Field(ge=1)
+    relation: DependencyRelation
+    changed_fields: List[str] = Field(default_factory=list)
+    note: str = ""
+
+    @property
+    def ref(self) -> str:
         return evidence_ref(self.evidence_id, self.evidence_version)
 
 
@@ -313,6 +333,11 @@ class UpdateEvent(SchemaBase):
     to_snapshot: str = Field(min_length=1)
     triggered_by: Dict[str, List[str]] = Field(default_factory=dict)
     affected_candidates: Dict[str, List[str]] = Field(default_factory=dict)
+    system_candidates: List[str] = Field(default_factory=list)
+    expert_reference_set: List[str] = Field(default_factory=list)
+    intersection: List[str] = Field(default_factory=list)
+    missed: List[str] = Field(default_factory=list)
+    false_positives: List[str] = Field(default_factory=list)
     approved_affected: List[str] = Field(default_factory=list)
     new_viewpoint_versions: List[str] = Field(default_factory=list)
     unchanged_viewpoints: List[str] = Field(default_factory=list)
@@ -327,7 +352,8 @@ class HumanReview(SchemaBase):
     approved: bool
     reviewer: str = Field(min_length=1)
     reviewed_at: datetime = Field(default_factory=utc_now)
-    artifact: str = Field(min_length=1)
+    artifact_path: str = Field(min_length=1)
+    artifact_hash: str = Field(min_length=1)
     notes: str = ""
 
 
