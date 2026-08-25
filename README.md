@@ -50,6 +50,10 @@ python -m src.pipeline update-t1 --case synthetic_military_ai --from <T0快照ID
 
 默认数据库为 `data/research.sqlite3`，运行产物位于 `outputs/<run_id>/`。可以用 `--workspace` 指定另一份工作目录。旧版阶段 A 数据库首次打开时会迁移 evidence、snapshot_items 和 evidence_dependency 的 case-scoped 外键结构，并回填新增的审计字段。
 
+## 协议第 12 节 P0
+
+P0 已建立 `config/case_us_military_ai.yaml`、`data/curated/` 下的 source manifest/search log 空模板、`prompts/` 下的 Luna 资料搜集和证据抽取模板，以及 `data/raw/t1_sealed/` 的读取保护。T1 封存目录在 G4-T0 审核记录写入前不可读取。P0 只建立结构和合成测试，不填入真实材料、竞争性假设或专家结论。
+
 ## 明确未实现内容
 
 阶段 B 的 `ModelClient`、提示模板、模型调用、结构化输出重试、真实材料抽取和语义检索均未实现。完成阶段 A 验收前不会接入这些内容。
