@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS evidence (
     snapshot_tag TEXT NOT NULL CHECK(snapshot_tag IN ('T0', 'T1')),
     status TEXT NOT NULL,
     published_at TEXT NOT NULL,
+    published_at_precision TEXT NOT NULL DEFAULT 'day',
     content_hash TEXT NOT NULL,
     evidence_nature TEXT NOT NULL DEFAULT 'legacy_unclassified',
     excerpt_original TEXT NOT NULL DEFAULT '',
@@ -371,6 +372,7 @@ class Store:
             self.conn.execute("UPDATE evidence SET case_id=? WHERE case_id='__legacy__'", (legacy_case,))
             evidence_columns.add("case_id")
         for column, definition in (
+            ("published_at_precision", "TEXT NOT NULL DEFAULT 'day'"),
             ("evidence_nature", "TEXT NOT NULL DEFAULT 'legacy_unclassified'"),
             ("excerpt_original", "TEXT NOT NULL DEFAULT ''"),
             ("excerpt_zh", "TEXT NOT NULL DEFAULT ''"),
@@ -384,6 +386,7 @@ class Store:
             changed = False
             defaults = {
                 "case_id": row["case_id"],
+                "published_at_precision": "day",
                 "evidence_nature": "legacy_unclassified",
                 "excerpt_original": "",
                 "excerpt_zh": "",
@@ -395,10 +398,11 @@ class Store:
                     changed = True
             if changed:
                 self.conn.execute(
-                    "UPDATE evidence SET payload_json=?, evidence_nature=?, excerpt_original=?, excerpt_zh=?, coding_dimensions_json=? "
+                    "UPDATE evidence SET payload_json=?, published_at_precision=?, evidence_nature=?, excerpt_original=?, excerpt_zh=?, coding_dimensions_json=? "
                     "WHERE evidence_id=? AND version=?",
                     (
                         _json(payload),
+                        payload["published_at_precision"],
                         payload["evidence_nature"],
                         payload["excerpt_original"],
                         payload["excerpt_zh"],
@@ -450,6 +454,7 @@ class Store:
                     snapshot_tag TEXT NOT NULL CHECK(snapshot_tag IN ('T0', 'T1')),
                     status TEXT NOT NULL,
                     published_at TEXT NOT NULL,
+                    published_at_precision TEXT NOT NULL DEFAULT 'day',
                     content_hash TEXT NOT NULL,
                     evidence_nature TEXT NOT NULL DEFAULT 'legacy_unclassified',
                     excerpt_original TEXT NOT NULL DEFAULT '',
@@ -483,8 +488,8 @@ class Store:
                 """
             )
             self.conn.execute(
-                "INSERT INTO evidence(case_id, evidence_id, version, snapshot_tag, status, published_at, content_hash, evidence_nature, excerpt_original, excerpt_zh, coding_dimensions_json, payload_json) "
-                "SELECT case_id, evidence_id, version, snapshot_tag, status, published_at, content_hash, evidence_nature, excerpt_original, excerpt_zh, coding_dimensions_json, payload_json FROM evidence_legacy"
+                "INSERT INTO evidence(case_id, evidence_id, version, snapshot_tag, status, published_at, published_at_precision, content_hash, evidence_nature, excerpt_original, excerpt_zh, coding_dimensions_json, payload_json) "
+                "SELECT case_id, evidence_id, version, snapshot_tag, status, published_at, published_at_precision, content_hash, evidence_nature, excerpt_original, excerpt_zh, coding_dimensions_json, payload_json FROM evidence_legacy"
             )
             self.conn.execute(
                 "INSERT INTO snapshot_items(snapshot_id, case_id, evidence_id, version) "
@@ -622,8 +627,8 @@ class Store:
                 )
             return model_validate(Evidence, existing_data)  # type: ignore[return-value]
         self.conn.execute(
-            "INSERT INTO evidence(case_id, evidence_id, version, snapshot_tag, status, published_at, content_hash, evidence_nature, excerpt_original, excerpt_zh, coding_dimensions_json, payload_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO evidence(case_id, evidence_id, version, snapshot_tag, status, published_at, published_at_precision, content_hash, evidence_nature, excerpt_original, excerpt_zh, coding_dimensions_json, payload_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 evidence.case_id,
                 evidence.evidence_id,
@@ -631,6 +636,7 @@ class Store:
                 evidence.snapshot_tag.value,
                 evidence.status.value,
                 evidence.published_at.isoformat(),
+                evidence.published_at_precision,
                 evidence.content_hash,
                 evidence.evidence_nature,
                 evidence.excerpt_original,

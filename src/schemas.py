@@ -14,7 +14,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 
 try:  # Pydantic v2 exposes model_validate on BaseModel.
     from pydantic import ConfigDict
@@ -162,6 +162,52 @@ class EvidenceCitation(SchemaBase):
         return evidence_ref(self.evidence_id, self.version)
 
 
+EVIDENCE_NATURE_VALUES = frozenset(
+    {"goal", "resource_input", "test_result", "deployment_event", "constraint", "evaluation"}
+)
+CODING_DIMENSION_VALUES = frozenset(
+    {
+        "integration_level",
+        "application_maturity",
+        "human_machine_authority",
+        "engineering_resource_conditions",
+        "trust_governance_constraints",
+        "organizational_system_fit",
+    }
+)
+
+
+class EvidenceCandidate(SchemaBase):
+    """Strict model for the eight fields a model may return during P3.
+
+    Runtime metadata is inherited from SchemaBase and is injected by the
+    program.  FileBridgeModelClient validates the raw JSON key set before
+    constructing this object, so a model cannot supply deterministic fields.
+    """
+
+    source_id: str = Field(min_length=1)
+    source_locator: str = Field(min_length=1)
+    excerpt_original: str = Field(min_length=1)
+    excerpt_zh: str = ""
+    normalized_claim: str = Field(min_length=1)
+    coding_dimensions: List[str] = Field(default_factory=list)
+    evidence_nature: str = Field(min_length=1)
+    topics: List[str] = Field(default_factory=list)
+
+    @validator("evidence_nature")
+    def validate_evidence_nature(cls, value: str) -> str:
+        if value not in EVIDENCE_NATURE_VALUES:
+            raise ValueError(f"Unsupported evidence_nature: {value}")
+        return value
+
+    @validator("coding_dimensions")
+    def validate_coding_dimensions(cls, values: List[str]) -> List[str]:
+        invalid = sorted(set(values) - CODING_DIMENSION_VALUES)
+        if invalid:
+            raise ValueError(f"Unsupported coding_dimensions: {invalid}")
+        return values
+
+
 class Evidence(SchemaBase):
     case_id: str = Field(min_length=1)
     evidence_id: str = Field(min_length=1)
@@ -172,6 +218,7 @@ class Evidence(SchemaBase):
     source_grade: SourceGrade
     publisher: str = Field(min_length=1)
     published_at: date
+    published_at_precision: str = "day"
     valid_from: Optional[date] = None
     valid_to: Optional[date] = None
     url_or_path: str = Field(min_length=1)
@@ -187,6 +234,12 @@ class Evidence(SchemaBase):
     content_hash: str = ""
     reviewed_by: str = Field(min_length=1)
     synthetic: bool = False
+
+    @validator("published_at_precision")
+    def validate_published_at_precision(cls, value: str) -> str:
+        if value not in {"day", "month", "year"}:
+            raise ValueError("published_at_precision must be day, month, or year")
+        return value
 
 
 class EvidenceSnapshot(SchemaBase):
@@ -392,12 +445,18 @@ def model_copy(model: BaseModel, *, update: Dict[str, Any]) -> BaseModel:
 
 
 def compute_evidence_hash(evidence: Evidence) -> str:
-    payload = model_dump(evidence)
-    # Runtime metadata must not make the same curated evidence look revised.
-    for field in ("content_hash", "created_at", "run_id", "schema_version"):
-        payload.pop(field, None)
+    return compute_source_excerpt_hash(
+        evidence.url_or_path,
+        evidence.page_or_section or "",
+        evidence.excerpt_original or evidence.excerpt,
+    )
+
+
+def compute_source_excerpt_hash(source: str, locator: str, excerpt_original: str) -> str:
+    """Hash only source, locator, and verbatim excerpt content."""
+    payload = [source, locator, excerpt_original]
     return hashlib.sha256(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
 
 
