@@ -11,6 +11,9 @@
   "requested_model_id": "deepseek-v4-flash-0731",
   "api_endpoint": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions",
   "provider_call_count": 6,
+  "provider_call_count_status": "observed_network_attempts",
+  "provider_temperature": null,
+  "provider_cost": null,
   "logical_extraction_batch_count": 3,
   "logical_semantic_review_batch_count": 3,
   "api_call_records": [

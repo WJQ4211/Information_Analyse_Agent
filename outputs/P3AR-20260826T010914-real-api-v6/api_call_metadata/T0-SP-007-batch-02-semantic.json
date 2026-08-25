@@ -19,6 +19,8 @@
     "total_tokens": 2766
   },
   "provider_metrics_status": "observed",
+  "provider_temperature": null,
+  "provider_cost": null,
   "response_status_code": 200,
   "phase": "claim_evidence_semantic_review",
   "batch_id": "T0-SP-007-batch-02",
