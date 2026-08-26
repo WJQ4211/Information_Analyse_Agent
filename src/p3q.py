@@ -115,7 +115,17 @@ def _dimension_reviews(candidate: Any) -> tuple[list[dict[str, Any]], list[str]]
     removed: list[str] = []
     for dimension in candidate.coding_dimensions:
         supported, span, reason = _dimension_support(dimension, candidate.excerpt_original)
-        reviews.append({"dimension": dimension, "supported": supported, "supporting_span": span, "reason": reason})
+        reviews.append(
+            {
+                "dimension": dimension,
+                "supported": supported,
+                "supporting_span": span,
+                "reason": reason,
+                "review_origin": "offline_keyword_heuristic",
+                "model_generated": False,
+                "human_reviewed": False,
+            }
+        )
         if not supported:
             removed.append(dimension)
     return reviews, removed
@@ -203,7 +213,8 @@ def run_p3q(run_id: str, run_dir: Path) -> dict[str, Any]:
     schema_valid_count = 0
     exact_count = 0
     gate_count = 0
-    semantic_pass_count = 0
+    inherited_claim_nature_pass_count = 0
+    offline_dimension_screen_pass_count = 0
     seen_by_source: dict[str, set[str]] = {source_id: set() for source_id in SOURCE_IDS}
     review_paths = {path.stem: path for path in (V6_DIR / "raw_semantic_reviews").glob("*.json")}
 
@@ -269,9 +280,15 @@ def run_p3q(run_id: str, run_dir: Path) -> dict[str, Any]:
                 for reason in set(reasons):
                     hard_rejection_counts[reason] += 1
             review = review_map.get(index)
+            inherited_claim_nature_pass = bool(
+                review
+                and review.get("status") == "pass"
+                and review.get("claim_supported") is True
+                and review.get("nature_supported") is True
+            )
+            inherited_claim_nature_pass_count += int(inherited_claim_nature_pass)
             semantic_status, semantic_reason, dimension_reviews, removed_dimensions = _semantic_screen(review, candidate) if candidate else ("reject", "schema invalid", [], [])
-            if semantic_status == "pass":
-                semantic_pass_count += 1
+            offline_dimension_screen_pass_count += int(any(item["supported"] for item in dimension_reviews))
             final_candidate = bool(deterministic_pass and semantic_status == "pass")
             preview: dict[str, Any] = {
                 "batch_id": batch_id,
@@ -375,14 +392,16 @@ def run_p3q(run_id: str, run_dir: Path) -> dict[str, Any]:
         "schema_valid_count": schema_valid_count,
         "exact_quote_matched_count": exact_count,
         "deterministic_gate_passed_count": gate_count,
-        "same_model_semantic_screen_pass_count": semantic_pass_count,
+        "inherited_v6_same_model_claim_nature_pass_count": inherited_claim_nature_pass_count,
+        "offline_keyword_dimension_screen_pass_count": offline_dimension_screen_pass_count,
+        "hybrid_preview_pass_count": len(final_previews),
         "final_candidate_count": len(final_previews),
         "final_candidate_acceptance_rate": len(final_previews) / raw_count if raw_count else 0.0,
         "pending_g1_visual_review_count": pending_visual,
         "pending_g1_translation_review_count": pending_translation,
         "capitalized_entity_warning_count": warnings_count,
         "hard_rejection_reason_counts": dict(hard_rejection_counts),
-        "semantic_screening_label": "same_model_separate_call_semantic_screening",
+        "semantic_screening_label": "offline_keyword_dimension_heuristic_plus_inherited_v6_review",
         "dimension_support_is_not_accuracy": True,
         "pdf_status": pdf_info,
         "formal_evidence_db_rows_added": 0,

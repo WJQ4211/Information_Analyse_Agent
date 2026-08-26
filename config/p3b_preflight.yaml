@@ -2,9 +2,9 @@ stage: P3b
 purpose: "Configuration prepared by P3Q only; P3b is not executed in this run"
 model_client:
   transport: openai_compatible_api
-  base_url_env: P3_MODEL_BASE_URL
-  api_key_env: P3_MODEL_API_KEY
-  model_env: P3_MODEL_ID
+  base_url_env: MODEL_API_BASE_URL
+  api_key_env: MODEL_API_KEY
+  model_env: MODEL_ID
   requested_temperature: 0.0
   provider_temperature: null
   no_secret_logging: true

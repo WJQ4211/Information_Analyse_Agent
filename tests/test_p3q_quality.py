@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from src.p3ar import SourceSegment
-from src.p3q import _dimension_support, deterministic_gate_reasons
+from src.p3q import _dimension_reviews, _dimension_support, deterministic_gate_reasons
 from src.schemas import EvidenceCandidate
 
 
@@ -71,6 +71,23 @@ def test_dimension_regressions_are_conservative():
     assert _dimension_support("human_machine_authority", "The systems coordinated with a command center.")[0] is False
     assert _dimension_support("human_machine_authority", "The system provided information to watchstanders.")[0] is True
     assert _dimension_support("human_machine_authority", "Training and documentation were required.")[0] is False
+
+
+def test_offline_dimension_screen_is_not_model_or_human_review():
+    candidate = EvidenceCandidate(
+        source_id="T0-TD-008",
+        source_locator="article/paragraph-01",
+        excerpt_original="The system provided information to watchstanders.",
+        excerpt_zh="系统向值班人员提供信息。",
+        normalized_claim="系统向值班人员提供信息。",
+        coding_dimensions=["human_machine_authority"],
+        evidence_nature="test_result",
+        topics=["watchstanding"],
+    )
+    reviews, _ = _dimension_reviews(candidate)
+    assert reviews[0]["review_origin"] == "offline_keyword_heuristic"
+    assert reviews[0]["model_generated"] is False
+    assert reviews[0]["human_reviewed"] is False
 
 
 def test_gate_admission_does_not_change_only_with_claim_language():

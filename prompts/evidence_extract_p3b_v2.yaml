@@ -22,6 +22,22 @@ output_schema:
     - coding_dimensions
     - evidence_nature
     - topics
+  field_types:
+    source_id: string
+    source_locator: string
+    excerpt_original: string
+    excerpt_zh: string
+    normalized_claim: string
+    coding_dimensions: "array of zero or more exact dimension key strings"
+    evidence_nature: string
+    topics: "array of strings"
+  coding_dimensions_allowed_values:
+    - integration_level
+    - application_maturity
+    - human_machine_authority
+    - engineering_resource_conditions
+    - trust_governance_constraints
+    - organizational_system_fit
   normalized_claim_language: zh-CN
   excerpt_original_rule: "逐字复制输入文本；不得静默纠正OCR或版式错误"
 coding_dimensions:
