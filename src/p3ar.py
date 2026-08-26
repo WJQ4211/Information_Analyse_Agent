@@ -38,6 +38,15 @@ SP_PDF = ROOT / "data/staging/t0_candidates/manual/2024-06-RAI-STRATEGY-IMPLEMEN
 TD_TEXT = P1C_DIR / "web_text/T0-TD-008.txt"
 PROMPT_TEMPLATE = ROOT / "prompts/evidence_extract_v1.yaml"
 
+CODING_DIMENSION_DEFINITIONS = {
+    "integration_level": "能力集成层级：单工具、单任务、单平台、跨平台、跨任务或体系级集成。",
+    "application_maturity": "应用成熟度：概念战略、研发、试验、试点、采购部署或持续运用。",
+    "human_machine_authority": "人机权限关系：辅助决策、人在回路中、受监督自主或更高程度自主。仅有系统协同、信息传输或培训文档不足以支持该维度。",
+    "engineering_resource_conditions": "工程与资源条件：数据、算力、模型、接口、供应链、预算、人才和保障。",
+    "trust_governance_constraints": "可信与治理约束：安全、可靠性、测试评价、授权边界、责任与伦理。",
+    "organizational_system_fit": "组织与体系适配：指挥流程、任务编组、跨平台协同、人员负荷和组织变革。",
+}
+
 
 @dataclass(frozen=True)
 class SourceSegment:
@@ -49,6 +58,7 @@ class SourceSegment:
     section_title: str = ""
     machine_extracted_anchor: str = ""
     visual_review_required: bool = False
+    extraction_status: str = "extracted"
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -60,6 +70,7 @@ class SourceSegment:
             "section_title": self.section_title,
             "machine_extracted_anchor": self.machine_extracted_anchor,
             "visual_review_required": self.visual_review_required,
+            "extraction_status": self.extraction_status,
         }
 
 
@@ -170,17 +181,28 @@ def extract_pdf_segments(pdf_path: Path, source_id: str) -> tuple[list[SourceSeg
     if source_id not in SOURCE_IDS:
         raise ValueError("PDF extraction is only configured for the selected source")
     segments: list[SourceSegment] = []
-    extraction_status = "extracted"
+    non_text_pages: list[int] = []
+    ocr_required_pages: list[int] = []
+    page_dispositions: dict[str, str] = {}
+    layout_review_pages = {25, 26, 27, 28, 29, 30, 37}
     with pdfplumber.open(pdf_path) as pdf:
         for page_number, page in enumerate(pdf.pages, start=1):
             text = page.extract_text(x_tolerance=1, y_tolerance=3, layout=False) or ""
+            page_status = "extracted"
             if not text.strip():
-                extraction_status = "ocr_pending"
+                non_text_pages.append(page_number)
+                if page_number == len(pdf.pages) and page.images:
+                    page_status = "decorative_back_cover_no_ocr_required"
+                    page_dispositions[str(page_number)] = page_status
+                else:
+                    page_status = "ocr_pending"
+                    ocr_required_pages.append(page_number)
             lines = text.splitlines()
             printed = _printed_page_number(lines)
             section = _section_title(lines)
             printed_token = str(printed) if printed is not None else "pending"
             section_token = re.sub(r"[^A-Za-z0-9]+", "_", section).strip("_") or "pending"
+            page_visual_review = _visual_review_required(text) or page_number in layout_review_pages
             anchor = f"pdf_page_{page_number}|printed_page_{printed_token}|section_{section_token}"
             segments.append(
                 SourceSegment(
@@ -191,7 +213,8 @@ def extract_pdf_segments(pdf_path: Path, source_id: str) -> tuple[list[SourceSeg
                     printed_page_number=printed,
                     section_title=section,
                     machine_extracted_anchor=anchor,
-                    visual_review_required=_visual_review_required(text),
+                    visual_review_required=page_visual_review,
+                    extraction_status=page_status,
                 )
             )
         info = {
@@ -199,8 +222,14 @@ def extract_pdf_segments(pdf_path: Path, source_id: str) -> tuple[list[SourceSeg
             "file_sha256": sha256_file(pdf_path),
             "file_size_bytes": pdf_path.stat().st_size,
             "pdf_page_count": len(pdf.pages),
-            "extraction_status": extraction_status,
-            "ocr_required": int(extraction_status == "ocr_pending"),
+            "extraction_status": "page_level",
+            "non_text_pages": non_text_pages,
+            "page_47_disposition": page_dispositions.get("47"),
+            "ocr_required_pages": ocr_required_pages,
+            "ocr_required": int(bool(ocr_required_pages)),
+            "layout_visual_review_required_pages": sorted(layout_review_pages | {
+                segment.pdf_page_number for segment in segments if segment.visual_review_required and segment.pdf_page_number is not None
+            }),
             "extraction_method": "pdfplumber_page_extract_text_no_ocr",
         }
     return segments, info
@@ -299,6 +328,7 @@ def build_extraction_prompt(segments: list[SourceSegment], template: dict[str, A
         "INPUT LIMIT: Use only the source segments below, the research question, and the field definitions in this prompt. Do not infer from prior runs.",
         "OUTPUT: A strict JSON array. Each object must contain exactly the eight fields in the output schema.",
         "Each candidate must express one checkable fact or one bounded explicit claim.",
+        "normalized_claim must be written in Chinese only. It must state only the evidence proposition and must not begin with source-attribution prefixes such as ‘本报告认为’ or ‘DoD RAI Pathway指出’. Source title, publisher, date, and URL/path are deterministic metadata fields supplied by the program, not claim text.",
         f"CANDIDATE_LIMIT: Output no more than {candidate_limit} candidates for this source; output fewer when evidence is insufficient.",
         "source_id must equal SOURCE_DOCUMENT_ID exactly. source_locator must equal the exact source_locator shown for the segment; do not substitute the machine anchor or a paragraph label.",
         "coding_dimensions must use only these exact keys: integration_level, application_maturity, human_machine_authority, engineering_resource_conditions, trust_governance_constraints, organizational_system_fit.",
@@ -350,12 +380,15 @@ def build_semantic_review_prompt(candidates: list[dict[str, Any]], template: dic
         )
     return "\n".join(
         [
-            "PROMPT_ID: evidence_claim_alignment_review",
+            "PROMPT_ID: same_model_separate_call_semantic_screening",
             "VERSION: 1.0",
             f"BATCH_ID: {batch_id}",
             "TASK: Independently audit whether each candidate's claim, dimensions, and evidence nature are directly supported by its own excerpt.",
             "INPUT LIMIT: Use only the candidate fields below. Do not use source metadata, other candidates, prior runs, or outside knowledge.",
-            "OUTPUT: strict JSON array with exactly candidate_index, status, reason, claim_supported, nature_supported, dimensions_supported.",
+            "OUTPUT: strict JSON array with exactly candidate_index, status, reason, claim_supported, nature_supported, dimension_reviews.",
+            "dimension_reviews must be an array with one object per declared dimension, each object containing exactly dimension, supported, supporting_span, reason.",
+            "Use the complete six-dimension definitions below when assessing each declared dimension:",
+            json.dumps(CODING_DIMENSION_DEFINITIONS, ensure_ascii=False, sort_keys=True),
             "status must be pass, revise, or reject. Do not rewrite candidates.",
             "Reject claims that add a subject, action, or result absent from the excerpt. Reject mere glossary or generic definition entries that do not directly serve the research question.",
             json.dumps(review_items, ensure_ascii=False, indent=2),
@@ -444,10 +477,13 @@ def inject_metadata(candidate: EvidenceCandidate, source: dict[str, str], run_id
             "excerpt": candidate.excerpt_original,
             "reviewed_by": "",
             "status": "candidate",
-            "translation_status": "pending_g1_translation_review",
             "run_id": run_id,
             "source_visual_review_required": segment.visual_review_required,
             "machine_extracted_anchor": segment.machine_extracted_anchor,
+            "machine_extracted_excerpt": candidate.excerpt_original,
+            "human_corrected_excerpt": None,
+            "visual_review_status": "pending_g1_visual_review" if segment.visual_review_required else "not_required_by_p3q",
+            "translation_status": "pending_g1_translation_review",
         }
     )
     return payload
@@ -466,14 +502,9 @@ def lexical_auto_rejection(candidate: EvidenceCandidate, segment: SourceSegment)
     excerpt_numbers = set(re.findall(r"\b\d+(?:\.\d+)?\b", excerpt))
     if not claim_numbers.issubset(excerpt_numbers):
         return "normalized_claim_adds_numeric_result_or_scope_not_in_excerpt"
-    capitalized_entities = set(re.findall(r"\b[A-Z][A-Za-z0-9-]{2,}\b", claim))
-    excerpt_folded = excerpt.casefold()
-    missing_entities = [entity for entity in capitalized_entities if entity.casefold() not in excerpt_folded]
-    if missing_entities:
-        return "normalized_claim_adds_subject_or_entity_not_in_excerpt"
-    strong_result_words = ("proved", "demonstrated effectiveness", "combat effective", "increased", "improved")
-    if any(word in claim_lower for word in strong_result_words) and not any(word in excerpt.casefold() for word in strong_result_words):
-        return "normalized_claim_adds_result_not_in_excerpt"
+    # Capitalized entities are intentionally not a deterministic rejection.
+    # OCR can render AI/RAI/DoD as Al/RAJ/OoD; semantic screening and G1 review
+    # decide whether the proposition is supported.
     return None
 
 
